@@ -1,1 +1,8 @@
 *.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+proxies.txt
+working_proxies.txt
+*.log
