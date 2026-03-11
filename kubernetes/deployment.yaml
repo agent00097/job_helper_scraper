@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: job-helper-scraper-config
+  namespace: resume-dev
+data:
+  # Database configuration
+  DB_HOST: "resume-postgres-rw.resume-dev.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "resume_jobs"  # Update with your database name
+  DB_USER: "resume_user"  # Update with your database user
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: job-helper-scraper-secrets
+  namespace: resume-dev
+type: Opaque
+stringData:
+  # Database password
+  DB_PASSWORD: "change_me_dev_password"  # Update with your actual password
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-helper-scraper
+  namespace: resume-dev
+  labels:
+    app: job-helper-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: job-helper-scraper
+  template:
+    metadata:
+      labels:
+        app: job-helper-scraper
+    spec:
+      containers:
+      - name: scraper
+        image: job-helper-scraper:latest  # Update with your image registry/path
+        imagePullPolicy: IfNotPresent
+        env:
+        # Database configuration from ConfigMap
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: job-helper-scraper-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: job-helper-scraper-config
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: job-helper-scraper-config
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            configMapKeyRef:
+              name: job-helper-scraper-config
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: job-helper-scraper-secrets
+              key: DB_PASSWORD
+        # DATABASE_URL will be constructed by docker-entrypoint.sh from the above components
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        # Note: No liveness/readiness probes since this is not an HTTP service
+        # The service runs continuously and logs to stdout
