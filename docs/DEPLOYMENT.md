@@ -1,108 +1,66 @@
 # Deployment Guide
 
-This guide explains how to deploy the job-helper-scraper service to Kubernetes.
+## Runtime model
 
-## Prerequisites
+- **Stack**: Python 3.11, `psycopg`, `requests` (see [`requirements.txt`](../requirements.txt) and [`Dockerfile`](../Dockerfile)).
+- **Process**: [`main.py`](../main.py) starts a [`Scheduler`](../scheduler.py) that loads enabled sources from the database and runs [`SourceWorker`](../workers/source_worker.py) threads on a loop (default check every 60 seconds, per-source interval from `schedule_hours` in `job_sources`).
+- **Workload**: **Deployment** (continuous worker), not a CronJob—the scheduler is designed to stay up and re-run sources on DB-driven schedules.
+- **HTTP**: None in this codebase; no Service or Ingress is required.
+- **Probes**: No HTTP health endpoints; manifests intentionally omit liveness/readiness probes to avoid fake checks.
+- **Storage**: Stateless; no PersistentVolume. All config and state live in PostgreSQL.
+- **Other dependencies**: Outbound HTTPS to public job APIs (e.g. Greenhouse). No Redis or extra services.
 
-- Docker installed
-- Kubernetes cluster access
-- kubectl configured
-- Access to the container registry
+## Docker
 
-## Building the Docker Image
-
-1. **Build the image:**
-   ```bash
-   docker build -t job-helper-scraper:latest .
-   ```
-
-2. **Tag for your registry (if using one):**
-   ```bash
-   docker tag job-helper-scraper:latest your-registry/job-helper-scraper:latest
-   ```
-
-3. **Push to registry (if using one):**
-   ```bash
-   docker push your-registry/job-helper-scraper:latest
-   ```
-
-## Kubernetes Deployment
-
-### 1. Update Configuration
-
-Edit `kubernetes/deployment.yaml` and update:
-- **Image name**: Change `job-helper-scraper:latest` to your registry path if needed
-- **Database credentials**: Update `DB_NAME`, `DB_USER`, and `DB_PASSWORD` in ConfigMap and Secret
-- **Namespace**: Update `resume-dev` if using a different namespace
-
-### 2. Apply Configuration
+Build and run locally:
 
 ```bash
-kubectl apply -f kubernetes/deployment.yaml
+docker build -t job-helper-scraper:local .
+docker run --rm -e DATABASE_URL=... job-helper-scraper:local
 ```
 
-### 3. Verify Deployment
+For Kubernetes, prefer `DB_*` variables (see [`db.py`](../db.py)) so passwords with special characters are safe.
+
+## Kubernetes (production layout)
+
+Manifests live under [`kubernetes/harco/`](../kubernetes/harco/):
+
+- [`configmap.yaml`](../kubernetes/harco/configmap.yaml) — non-secret DB settings and `PGSSLMODE`
+- [`deployment.yaml`](../kubernetes/harco/deployment.yaml) — Deployment `jobscraper`; image placeholder `PLACEHOLDER_IMAGE` is replaced by [`deploy.sh`](../kubernetes/harco/deploy.sh)
+
+[`kustomization.yaml`](../kubernetes/harco/kustomization.yaml) lists the same resources for optional `kubectl apply -k` use; the CI path uses `deploy.sh` so the image tag is always the commit SHA.
+
+### Database secret sync
+
+Create/update `harco/jobscraper-db` from `infra/pg-app-db`:
 
 ```bash
-# Check deployment status
-kubectl get deployment job-helper-scraper -n resume-dev
-
-# Check pods
-kubectl get pods -n resume-dev -l app=job-helper-scraper
-
-# View logs
-kubectl logs -f deployment/job-helper-scraper -n resume-dev
+./kubernetes/scripts/sync-jobscraper-db-secret.sh
 ```
 
-## Environment Variables
+### Manual deploy (server)
 
-The service uses the following environment variables (set via ConfigMap/Secret):
+From the repo root on the node that has kubeconfig:
 
-- `DB_HOST`: PostgreSQL host
-- `DB_PORT`: PostgreSQL port
-- `DB_NAME`: Database name
-- `DB_USER`: Database user
-- `DB_PASSWORD`: Database password (from Secret)
+```bash
+./kubernetes/harco/deploy.sh 'ghcr.io/<owner>/<repo>:<tag>'
+```
 
-The `docker-entrypoint.sh` script automatically constructs `DATABASE_URL` from these components.
+## CI/CD
 
-Alternatively, you can set `DATABASE_URL` directly if preferred.
+See [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) and the [README Production section](../README.md#production-kubernetes-k3s-on-hetzner-and-cicd).
 
-## Service Behavior
+## Updating configuration
 
-- **No HTTP endpoints**: This is a background worker service, not a web API
-- **Continuous operation**: Runs indefinitely, checking sources on their schedules
-- **Logs to stdout**: All logs are sent to stdout for Kubernetes log collection
-- **Single replica**: Runs as a single pod (no need for multiple replicas)
+Edit the ConfigMap and reapply:
 
-## Updating the Deployment
-
-1. Build and push new image
-2. Update image tag in `deployment.yaml` (if using versioned tags)
-3. Apply changes:
-   ```bash
-   kubectl apply -f kubernetes/deployment.yaml
-   kubectl rollout restart deployment/job-helper-scraper -n resume-dev
-   ```
+```bash
+kubectl apply -f kubernetes/harco/configmap.yaml
+kubectl rollout restart deployment/jobscraper -n harco
+```
 
 ## Troubleshooting
 
-### View Logs
-```bash
-kubectl logs -f deployment/job-helper-scraper -n resume-dev
-```
-
-### Check Pod Status
-```bash
-kubectl describe pod -l app=job-helper-scraper -n resume-dev
-```
-
-### Database Connection Issues
-- Verify ConfigMap and Secret are created correctly
-- Check database credentials
-- Ensure network connectivity from pod to database
-
-### Service Not Running
-- Check pod logs for errors
-- Verify database tables are created (run schema scripts)
-- Ensure sources are enabled in `job_sources` table
+- **ImagePullBackOff**: Check `ghcr-pull-secret` in `harco` and that the image name matches `ghcr.io/<lowercase-owner>/<repo>:<tag>`.
+- **DB connection**: Confirm `jobscraper-db` exists, network policy allows pods in `harco` to reach `infra`, and `PGSSLMODE` matches what CNPG expects.
+- **No scraping**: Ensure rows exist in `job_sources` / `source_companies` and sources are `enabled` (see main [README](../README.md)).
