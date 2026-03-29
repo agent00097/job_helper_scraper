@@ -3,7 +3,8 @@ Greenhouse API source for fetching jobs from Greenhouse job boards.
 """
 import requests
 import logging
-from typing import List, Dict
+import html
+from typing import List, Dict, Optional
 from datetime import datetime, date
 
 from sources.base_source import BaseSource
@@ -56,14 +57,32 @@ class GreenhouseSource(BaseSource):
             
             for job_data in jobs_data.get("jobs", []):
                 try:
+                    # Parse basic job info first
                     job = self._parse_job(job_data, company_name, company_endpoint)
                     if job:
+                        # Fetch full job description from detail endpoint
+                        job_id = job_data.get("id")
+                        job_description = self._fetch_job_description(
+                            company_endpoint, 
+                            job_id
+                        )
+                        if job_description:
+                            job.job_description = job_description
+                            logger.debug(f"Fetched description for job {job_id} ({len(job_description)} chars)")
+                        else:
+                            logger.debug(f"No description found for job {job_id}")
+                        
                         jobs.append(job)
                 except Exception as e:
                     logger.warning(f"Error parsing job from {company_name}: {e}")
                     continue
             
-            logger.info(f"Fetched {len(jobs)} jobs from {company_name}")
+            # Count how many jobs have descriptions
+            jobs_with_descriptions = sum(1 for job in jobs if job.job_description)
+            logger.info(
+                f"Fetched {len(jobs)} jobs from {company_name} "
+                f"({jobs_with_descriptions} with descriptions, {len(jobs) - jobs_with_descriptions} without)"
+            )
             return jobs
             
         except requests.exceptions.RequestException as e:
@@ -143,12 +162,15 @@ class GreenhouseSource(BaseSource):
         # Build application URL
         application_url = job_url  # Greenhouse jobs link to their own page
         
+        # Note: job_description will be fetched separately in fetch_jobs()
+        # to avoid making too many API calls in the list endpoint
+        
         job = JobData(
             url=job_url,
             job_title=job_data.get("title"),
             company=company_name,
             location=location,
-            job_description=job_data.get("content") or job_data.get("description") or None,
+            job_description=None,  # Will be fetched from detail endpoint
             date_posted=date_posted,
             employment_type=employment_type,
             application_url=application_url,
@@ -162,6 +184,93 @@ class GreenhouseSource(BaseSource):
         )
         
         return job
+    
+    def _fetch_job_description(self, company_endpoint: str, job_id: Optional[int]) -> Optional[str]:
+        """
+        Fetch the full job description from Greenhouse detail endpoint.
+        
+        Args:
+            company_endpoint: Company slug (e.g., 'airbnb')
+            job_id: Job ID from Greenhouse
+            
+        Returns:
+            Cleaned job description text or None if fetch fails
+        """
+        if not job_id:
+            return None
+        
+        self.rate_limiter.wait_if_needed()
+        
+        detail_url = f"{self.base_url}/boards/{company_endpoint}/jobs/{job_id}"
+        
+        try:
+            logger.debug(f"Fetching job description from {detail_url}")
+            response = requests.get(detail_url, timeout=30)
+            response.raise_for_status()
+            
+            job_detail = response.json()
+            content = job_detail.get("content")
+            
+            if content:
+                # Decode HTML entities (e.g., &lt; becomes <)
+                decoded_content = html.unescape(content)
+                # Clean up the HTML - remove tags but keep text
+                cleaned_content = self._clean_html(decoded_content)
+                logger.debug(f"Successfully fetched and cleaned description for job {job_id} ({len(cleaned_content)} chars)")
+                return cleaned_content
+            else:
+                logger.debug(f"No content field found in job detail for job {job_id}")
+                return None
+            
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Error fetching job description for job {job_id} from {detail_url}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Error processing job description for job {job_id}: {e}", exc_info=True)
+            return None
+    
+    def _clean_html(self, html_content: str) -> str:
+        """
+        Clean HTML content to extract readable text.
+        
+        Args:
+            html_content: HTML string
+            
+        Returns:
+            Cleaned text content
+        """
+        if not html_content:
+            return ""
+        
+        # Simple HTML tag removal using regex (basic approach)
+        # For more advanced cleaning, we could use BeautifulSoup, but keeping it simple for now
+        import re
+        
+        # Remove script and style tags and their content
+        html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Replace common HTML entities with newlines for better readability
+        html_content = html_content.replace('</p>', '\n\n')
+        html_content = html_content.replace('</div>', '\n')
+        html_content = html_content.replace('<br>', '\n')
+        html_content = html_content.replace('<br/>', '\n')
+        html_content = html_content.replace('<br />', '\n')
+        html_content = html_content.replace('</li>', '\n')
+        html_content = html_content.replace('</h1>', '\n\n')
+        html_content = html_content.replace('</h2>', '\n\n')
+        html_content = html_content.replace('</h3>', '\n\n')
+        html_content = html_content.replace('</h4>', '\n\n')
+        
+        # Remove all remaining HTML tags
+        html_content = re.sub(r'<[^>]+>', '', html_content)
+        
+        # Clean up whitespace
+        html_content = re.sub(r'\n\s*\n\s*\n+', '\n\n', html_content)  # Multiple newlines to double
+        html_content = re.sub(r'[ \t]+', ' ', html_content)  # Multiple spaces to single
+        html_content = html_content.strip()
+        
+        return html_content
     
     def get_rate_limit(self) -> int:
         """Get the rate limit for this source."""

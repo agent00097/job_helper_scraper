@@ -170,6 +170,34 @@ class Scheduler:
         
         logger.info(f"Scheduler started with {len(self.workers)} worker(s)")
     
+    def force_run_source(self, source_name: str):
+        """
+        Force run a source immediately, bypassing schedule checks.
+        
+        Args:
+            source_name: Name of the source to run (e.g., 'greenhouse')
+        """
+        logger.info(f"Force running source: {source_name}")
+        source_config = get_source_config(source_name)
+        
+        if not source_config:
+            logger.error(f"Source not found: {source_name}")
+            return
+        
+        if not source_config.get("enabled"):
+            logger.warning(f"Source {source_name} is disabled")
+            return
+        
+        # Run in a separate thread so we don't block
+        thread = threading.Thread(
+            target=self.run_source_worker,
+            args=(source_config,),
+            daemon=True,
+            name=f"force-run-{source_name}"
+        )
+        thread.start()
+        logger.info(f"Force run thread started for {source_name}")
+    
     def stop(self):
         """Stop the scheduler."""
         logger.info("Stopping scheduler...")
