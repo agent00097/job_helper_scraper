@@ -50,7 +50,7 @@ From the repo root on the node that has kubeconfig:
 
 Workflow: [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). It runs on **push to `main`**.
 
-Repository **variables**: `HETZNER_HOST`, `HETZNER_USER`, `HETZNER_REPO_PATH`. Repository **secret**: `HETZNER_SSH_KEY`.
+Repository **secrets**: `HETZNER_HOST`, `HETZNER_USER`, `HETZNER_SSH_KEY`, `HETZNER_REPO_PATH` (absolute path to this repo on the server for deploy `cd`).
 
 The job builds and pushes `ghcr.io/<repo>:<sha>` (and `:latest`), then SSHs to the server, resets the checkout to `origin/main`, and runs [`kubernetes/harco/deploy.sh`](../kubernetes/harco/deploy.sh) with the **SHA tag** only. Manifests are applied from that checkout (`kubectl apply` + `sed` for the image line); see the [README Production section](../README.md#production-kubernetes-k3s-on-hetzner-and-cicd).
 

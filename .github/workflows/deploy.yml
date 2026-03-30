@@ -36,16 +36,33 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:latest
 
+      - name: Verify SSH deploy secrets are non-empty
+        env:
+          HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
+          HETZNER_USER: ${{ secrets.HETZNER_USER }}
+          HETZNER_REPO_PATH: ${{ secrets.HETZNER_REPO_PATH }}
+          HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+        run: |
+          ok=1
+          if [ -z "${HETZNER_HOST// }" ]; then echo "::error::HETZNER_HOST secret is missing or empty"; ok=0; fi
+          if [ -z "${HETZNER_USER// }" ]; then echo "::error::HETZNER_USER secret is missing or empty"; ok=0; fi
+          if [ -z "${HETZNER_REPO_PATH// }" ]; then echo "::error::HETZNER_REPO_PATH secret is missing or empty"; ok=0; fi
+          if [ -z "${HETZNER_SSH_KEY// }" ]; then echo "::error::HETZNER_SSH_KEY secret is missing or empty"; ok=0; fi
+          if [ "$ok" -eq 0 ]; then exit 1; fi
+          echo "HETZNER_HOST is set (length ${#HETZNER_HOST})"
+          echo "HETZNER_USER is set (length ${#HETZNER_USER})"
+          echo "HETZNER_REPO_PATH and HETZNER_SSH_KEY are set (values not printed)"
+
       - name: Deploy on Hetzner (SSH + kubectl)
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ vars.HETZNER_HOST }}
-          username: ${{ vars.HETZNER_USER }}
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
           key: ${{ secrets.HETZNER_SSH_KEY }}
           script_stop: true
           script: |
             set -euo pipefail
-            cd "${{ vars.HETZNER_REPO_PATH }}"
+            cd "${{ secrets.HETZNER_REPO_PATH }}"
             git fetch origin main
             git reset --hard origin/main
             chmod +x kubernetes/harco/deploy.sh kubernetes/scripts/sync-jobscraper-db-secret.sh

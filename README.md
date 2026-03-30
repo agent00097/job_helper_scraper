@@ -148,25 +148,24 @@ Before the first successful workflow run:
 ./kubernetes/scripts/sync-jobscraper-db-secret.sh
 ```
 
-6. Clone this repository on the server at the path you set in **`HETZNER_REPO_PATH`** (GitHub variable below).
+6. Clone this repository on the server at the absolute path stored in the **`HETZNER_REPO_PATH`** secret (see below).
 
 ### GitHub configuration (aligned with backend/frontend naming)
+
+All deploy-related values are **repository secrets** (no repository variables required).
 
 **Secrets (repository)**
 
 | Secret | Purpose |
 |--------|---------|
-| `HETZNER_SSH_KEY` | Private key for SSH from Actions to the Hetzner server (cluster API is not exposed to GitHub). |
+| `HETZNER_HOST` | Server hostname or IP for SSH. |
+| `HETZNER_USER` | SSH user (must have `kubectl` and kubeconfig for the cluster). |
+| `HETZNER_SSH_KEY` | Private key for that user (cluster API is not exposed to GitHub). |
+| `HETZNER_REPO_PATH` | Absolute path to this repo on the server (e.g. `/home/deploy/job-helper-scraper`) for `cd` before `git fetch` / deploy. |
 
 `GITHUB_TOKEN` is provided automatically for GHCR login and push.
 
-**Variables (repository)**
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `HETZNER_HOST` | Yes | Server hostname or IP for SSH. |
-| `HETZNER_USER` | Yes | SSH user (must have `kubectl` and kubeconfig for the cluster). |
-| `HETZNER_REPO_PATH` | Yes | Absolute path to this repo on the server (e.g. `/home/deploy/job-helper-scraper`). |
+Before the SSH step, the workflow runs a short check that **`HETZNER_HOST`** and **`HETZNER_USER`** are non-empty; it logs only **character lengths**, not values.
 
 Optional: if SSH is not on port 22, add a `port:` line to the `appleboy/ssh-action` step in [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
 
@@ -176,7 +175,7 @@ Triggers on **every push to `main`** (see [`.github/workflows/deploy.yml`](.gith
 
 1. Builds the image from the repo root [`Dockerfile`](Dockerfile).
 2. Pushes to GHCR as `ghcr.io/<lowercase-owner>/<repo>:<sha>` and `:latest`.
-3. SSHs to Hetzner, **`cd` to the server checkout** (`HETZNER_REPO_PATH`), `git fetch` / `git reset --hard origin/main`.
+3. SSHs to Hetzner, **`cd` to the server checkout** (secret `HETZNER_REPO_PATH`), `git fetch` / `git reset --hard origin/main`.
 4. Runs [`kubernetes/harco/deploy.sh`](kubernetes/harco/deploy.sh) with the **commit SHA image** only (`...:<github.sha>`), not `:latest`.
 
 **Why manifests from the server repo:** the same files you version in Git are what `kubectl apply` uses after `git reset --hard origin/main`, so deploys stay reproducible and match `main`. The Deployment manifest keeps a `PLACEHOLDER_IMAGE`; `deploy.sh` **`sed`-substitutes the real `ghcr.io/...:<sha>`** and pipes YAML to `kubectl apply`, so Kubernetes never needs a manual `kubectl set image` and the running tag is always the SHA built in that workflow run.
