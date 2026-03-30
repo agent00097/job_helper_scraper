@@ -48,7 +48,15 @@ From the repo root on the node that has kubeconfig:
 
 ## CI/CD
 
-See [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) and the [README Production section](../README.md#production-kubernetes-k3s-on-hetzner-and-cicd).
+Workflow: [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). It runs on **push to `main`**.
+
+Repository **variables**: `HETZNER_HOST`, `HETZNER_USER`, `HETZNER_REPO_PATH`. Repository **secret**: `HETZNER_SSH_KEY`.
+
+The job builds and pushes `ghcr.io/<repo>:<sha>` (and `:latest`), then SSHs to the server, resets the checkout to `origin/main`, and runs [`kubernetes/harco/deploy.sh`](../kubernetes/harco/deploy.sh) with the **SHA tag** only. Manifests are applied from that checkout (`kubectl apply` + `sed` for the image line); see the [README Production section](../README.md#production-kubernetes-k3s-on-hetzner-and-cicd).
+
+### CloudNativePG password key
+
+[`sync-jobscraper-db-secret.sh`](../kubernetes/scripts/sync-jobscraper-db-secret.sh) reads the upstream secret key **`password`** by default. If `pg-app-db` (or your source secret) uses a different data key, set **`PASSWORD_KEY`** when running the script.
 
 ## Updating configuration
 

@@ -124,30 +124,39 @@ See `docs/` for more detailed documentation.
 
 ## Production: Kubernetes (k3s on Hetzner) and CI/CD
 
-This service is a **long-running Python worker** (`main.py` → `Scheduler` → background threads). It is **not** an HTTP server. Deploy it as a **single-replica Deployment** in namespace `harco`, with **no Ingress**. Use **one replica only** so the same sources are not scraped concurrently.
+This service is a **long-running Python worker** (`main.py` → `Scheduler` → background threads). It is **not** an HTTP server.
 
-### One-time cluster prerequisites
+**Keep this worker single-replica.** The Deployment is committed with `replicas: 1`. Scaling above one runs multiple schedulers and **duplicates scraping** against the same sources and database. There is **no Service** and **no Ingress** in this repo because the code does not expose an HTTP port.
 
-1. Namespace `harco` exists and `ghcr-pull-secret` is present (for private GHCR pulls).
-2. PostgreSQL reachable at `app-postgres-rw.infra.svc.cluster.local:5432`, database `resume_jobs`, user `resume_user`.
-3. Apply SQL schemas to that database (see [Database Setup](#2-database-setup)).
-4. Create the app DB password secret in `harco` (copied from CloudNativePG app secret `pg-app-db` in `infra`):
+### Probes (no HTTP)
 
-   ```bash
-   ./kubernetes/scripts/sync-jobscraper-db-secret.sh
-   ```
+The Deployment **intentionally has no `livenessProbe` or `readinessProbe`**. The process does not serve HTTP, so an HTTP probe would be misleading. An `exec` liveness probe (e.g. `pgrep python`) was not added: if a scrape runs for a long time, a naive process check can still be a poor signal, and **if the main process exits, the container exits** anyway. See comments in [`kubernetes/harco/deployment.yaml`](kubernetes/harco/deployment.yaml).
 
-   If your infra secret uses a different key than `password`, set `PASSWORD_KEY` (see script header).
+### One-time prerequisites (checklist)
 
-5. On the Hetzner node, clone this repository to the path you will use for deploys (same path as `DEPLOY_PATH` below). Configure `git` on the server so `git fetch origin main` works (deploy key or cached credentials).
+Before the first successful workflow run:
 
-### GitHub configuration
+1. **Deploy user on the Hetzner server** has a **kubeconfig** (e.g. default `~/.kube/config`) that can `kubectl apply` to namespace `harco` on your k3s cluster.
+2. **Server-side Git** can fetch this repo over **SSH** (or another method you wire into `git fetch`): deploy key, SSH agent, or equivalent so `git fetch origin main` succeeds in the checkout directory.
+3. Namespace **`harco`** exists and **`ghcr-pull-secret`** is present there (private GHCR pulls).
+4. PostgreSQL reachable at `app-postgres-rw.infra.svc.cluster.local:5432`, database `resume_jobs`, user `resume_user`; SQL schemas applied (see [Database Setup](#2-database-setup)).
+5. Secret **`jobscraper-db`** in **`harco`** with key **`DB_PASSWORD`**, synced from CloudNativePG (see below).
+
+**DB password sync:** CloudNativePG application secrets (e.g. `pg-app-db` in `infra`) typically store the password under the key **`password`**. If yours differs, run the sync script with `PASSWORD_KEY=...` (see [`kubernetes/scripts/sync-jobscraper-db-secret.sh`](kubernetes/scripts/sync-jobscraper-db-secret.sh)).
+
+```bash
+./kubernetes/scripts/sync-jobscraper-db-secret.sh
+```
+
+6. Clone this repository on the server at the path you set in **`HETZNER_REPO_PATH`** (GitHub variable below).
+
+### GitHub configuration (aligned with backend/frontend naming)
 
 **Secrets (repository)**
 
 | Secret | Purpose |
 |--------|---------|
-| `SSH_PRIVATE_KEY` | Private key for SSH from Actions to the Hetzner server (no kubeconfig in GitHub). |
+| `HETZNER_SSH_KEY` | Private key for SSH from Actions to the Hetzner server (cluster API is not exposed to GitHub). |
 
 `GITHUB_TOKEN` is provided automatically for GHCR login and push.
 
@@ -155,39 +164,45 @@ This service is a **long-running Python worker** (`main.py` → `Scheduler` → 
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `DEPLOY_HOST` | Yes | Server hostname or IP for SSH. |
-| `DEPLOY_USER` | Yes | SSH user (must have `kubectl` and a valid kubeconfig for your k3s cluster). |
-| `DEPLOY_PATH` | Yes | Absolute path to this repo on the server (e.g. `/home/deploy/job-helper-scraper`). |
+| `HETZNER_HOST` | Yes | Server hostname or IP for SSH. |
+| `HETZNER_USER` | Yes | SSH user (must have `kubectl` and kubeconfig for the cluster). |
+| `HETZNER_REPO_PATH` | Yes | Absolute path to this repo on the server (e.g. `/home/deploy/job-helper-scraper`). |
 
 Optional: if SSH is not on port 22, add a `port:` line to the `appleboy/ssh-action` step in [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
 
-### What CI does
+### What CI does (deploy method)
 
-On every push to `main`, [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml):
+Triggers on **every push to `main`** (see [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)).
 
-1. Builds the Docker image from the repo root [`Dockerfile`](Dockerfile).
-2. Pushes to GHCR as `ghcr.io/<owner>/<repo>:<sha>` and `:latest` (repository name lowercased for GHCR).
-3. SSHs to Hetzner, runs `git fetch` / `git reset --hard origin/main`, then [`kubernetes/harco/deploy.sh`](kubernetes/harco/deploy.sh) with the `:sha` image.
-4. Waits for `kubectl rollout status` on `deployment/jobscraper`.
+1. Builds the image from the repo root [`Dockerfile`](Dockerfile).
+2. Pushes to GHCR as `ghcr.io/<lowercase-owner>/<repo>:<sha>` and `:latest`.
+3. SSHs to Hetzner, **`cd` to the server checkout** (`HETZNER_REPO_PATH`), `git fetch` / `git reset --hard origin/main`.
+4. Runs [`kubernetes/harco/deploy.sh`](kubernetes/harco/deploy.sh) with the **commit SHA image** only (`...:<github.sha>`), not `:latest`.
 
-Kubernetes API access stays on the server; GitHub never talks to the cluster API.
+**Why manifests from the server repo:** the same files you version in Git are what `kubectl apply` uses after `git reset --hard origin/main`, so deploys stay reproducible and match `main`. The Deployment manifest keeps a `PLACEHOLDER_IMAGE`; `deploy.sh` **`sed`-substitutes the real `ghcr.io/...:<sha>`** and pipes YAML to `kubectl apply`, so Kubernetes never needs a manual `kubectl set image` and the running tag is always the SHA built in that workflow run.
+
+5. **`deploy.sh`** prints `kubectl get deployment` / `kubectl get pods`, runs **`kubectl rollout status`**, prints them again on success, and on rollout failure prints **`kubectl describe deployment`** and **recent `kubectl get events`**.
+
+Kubernetes API access stays on the server only.
+
+### Resource requests and limits
+
+In [`kubernetes/harco/deployment.yaml`](kubernetes/harco/deployment.yaml): **requests** `cpu: 100m`, `memory: 256Mi`; **limits** `cpu: 1000m`, `memory: 768Mi`. Rationale: keep a small baseline on a single-node host while allowing bursts during HTTP fetches and DB writes; the memory limit headroom reduces OOM risk when descriptions or batches are large.
 
 ### Kubernetes objects (namespace `harco`)
 
 | Object | Name | Role |
 |--------|------|------|
-| ConfigMap | `jobscraper-config` | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `PGSSLMODE` |
-| Secret | `jobscraper-db` | `DB_PASSWORD` (sync from `infra/pg-app-db`) |
-| Deployment | `jobscraper` | Runs `python -u main.py`; `imagePullSecrets: ghcr-pull-secret` |
+| ConfigMap | `jobscraper-config` | Non-secret DB settings + `PGSSLMODE` |
+| Secret | `jobscraper-db` | `DB_PASSWORD` only (sync from `infra/pg-app-db`) |
+| Deployment | `jobscraper` | Single replica; `imagePullSecrets: ghcr-pull-secret` |
 
-Exact connectivity env vars:
+There is **no Service** or **Ingress** in this repository.
 
-- `DB_HOST` = `app-postgres-rw.infra.svc.cluster.local`
-- `DB_PORT` = `5432`
-- `DB_NAME` = `resume_jobs`
-- `DB_USER` = `resume_user`
-- `DB_PASSWORD` = from secret `jobscraper-db` / key `DB_PASSWORD`
-- `PGSSLMODE` = `prefer` (override in ConfigMap if your CNPG setup needs `require` / `verify-full` / `disable`)
+**Effective container environment** (Kubernetes):
+
+- From ConfigMap `jobscraper-config`: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `PGSSLMODE`
+- From Secret `jobscraper-db` key `DB_PASSWORD`: `DB_PASSWORD`
 
 ### Operations
 

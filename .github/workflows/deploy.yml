@@ -39,13 +39,13 @@ jobs:
       - name: Deploy on Hetzner (SSH + kubectl)
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ vars.DEPLOY_HOST }}
-          username: ${{ vars.DEPLOY_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ vars.HETZNER_HOST }}
+          username: ${{ vars.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
           script_stop: true
           script: |
             set -euo pipefail
-            cd "${{ vars.DEPLOY_PATH }}"
+            cd "${{ vars.HETZNER_REPO_PATH }}"
             git fetch origin main
             git reset --hard origin/main
             chmod +x kubernetes/harco/deploy.sh kubernetes/scripts/sync-jobscraper-db-secret.sh

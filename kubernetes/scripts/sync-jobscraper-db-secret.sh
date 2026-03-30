@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# Create or update secret jobscraper-db in harco with DB_PASSWORD copied from the
-# CloudNativePG application secret in infra. Run once per cluster (or after DB password rotation).
+# Create or update secret jobscraper-db (namespace harco) with key DB_PASSWORD, matching
+# kubernetes/harco/deployment.yaml secretKeyRef exactly.
 #
-# Override key names if your pg-app-db secret uses different fields:
+# Upstream: CloudNativePG application secrets (e.g. your synced user secret pg-app-db in infra)
+# usually expose the database password under the key "password". If your secret uses another
+# field (e.g. pgpassword, or a custom operator label), set PASSWORD_KEY when invoking this script.
+#
+# Run once per cluster (or after DB password rotation).
+#
+# Override source/target if needed:
 #   INFRA_SECRET_NAME   default: pg-app-db
 #   INFRA_NAMESPACE     default: infra
 #   PASSWORD_KEY        default: password
+#   TARGET_NS           default: harco
+#   TARGET_SECRET       default: jobscraper-db
 #
 set -euo pipefail
 

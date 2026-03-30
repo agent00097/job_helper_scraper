@@ -1,3 +1,6 @@
+# Long-running scraper worker: keep a single replica. Scaling replicas above 1 runs
+# duplicate Scheduler instances and duplicates scraping work against the same DB/sources.
+# There is no Service or Ingress; the app does not listen for HTTP.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +9,7 @@ metadata:
   labels:
     app: jobscraper
 spec:
+  # Pinned: do not scale up without refactoring (see comment above).
   replicas: 1
   strategy:
     type: RollingUpdate
@@ -20,6 +24,7 @@ spec:
       labels:
         app: jobscraper
     spec:
+      # Committed intentionally for private GHCR pulls in harco (no manual patch).
       imagePullSecrets:
         - name: ghcr-pull-secret
       terminationGracePeriodSeconds: 60
@@ -32,11 +37,13 @@ spec:
             - configMapRef:
                 name: jobscraper-config
           env:
+            # Secret shape must match kubernetes/scripts/sync-jobscraper-db-secret.sh
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: jobscraper-db
                   key: DB_PASSWORD
+          # Bursts during scrapes (HTTP + DB); limits cap noisy neighbor impact on a single-node k3s host.
           resources:
             requests:
               memory: "256Mi"
@@ -44,3 +51,6 @@ spec:
             limits:
               memory: "768Mi"
               cpu: "1000m"
+          # No liveness/readiness probes: this process is not an HTTP server. Crash/hang
+          # handling is documented in README (avoid fake HTTP probes; exec probes can
+          # restart during legitimately long scrapes).
