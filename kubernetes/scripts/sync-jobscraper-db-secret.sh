@@ -16,6 +16,7 @@
 #   TARGET_SECRET       default: jobscraper-db
 #
 set -euo pipefail
+export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 
 INFRA_SECRET_NAME="${INFRA_SECRET_NAME:-pg-app-db}"
 INFRA_NAMESPACE="${INFRA_NAMESPACE:-infra}"

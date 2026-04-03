@@ -4,6 +4,7 @@
 # Usage: ./deploy.sh <full-image-reference>
 # Example: ./deploy.sh ghcr.io/myorg/job-helper-scraper:abc123def
 set -euo pipefail
+export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 
 IMAGE="${1:?Usage: $0 <full-image-reference>}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
