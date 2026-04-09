@@ -1,6 +1,7 @@
 """
 Greenhouse API source for fetching jobs from Greenhouse job boards.
 """
+import re
 import requests
 import logging
 import html
@@ -12,6 +13,26 @@ from models import JobData
 from utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
+
+# Public job posting pages: https://boards.greenhouse.io/{board}/jobs/{id}
+GREENHOUSE_BOARD_JOB_URL_RE = re.compile(
+    r"^https?://boards\.greenhouse\.io/([^/]+)/jobs/(\d+)/?$",
+    re.IGNORECASE,
+)
+
+
+def parse_greenhouse_board_job_url(url: str) -> Optional[tuple[str, int]]:
+    """
+    If url is a Greenhouse public board job page, return (board_token, job_id).
+
+    Board token is the path segment after boards.greenhouse.io (e.g. 'airbnb').
+    """
+    if not url:
+        return None
+    m = GREENHOUSE_BOARD_JOB_URL_RE.match(url.strip())
+    if not m:
+        return None
+    return m.group(1), int(m.group(2))
 
 
 class GreenhouseSource(BaseSource):
@@ -228,7 +249,52 @@ class GreenhouseSource(BaseSource):
         except Exception as e:
             logger.warning(f"Error processing job description for job {job_id}: {e}", exc_info=True)
             return None
-    
+
+    def _infer_company_name(self, job_detail: Dict, company_endpoint: str) -> str:
+        """Best-effort company display name from API detail or board slug."""
+        company = job_detail.get("company")
+        if isinstance(company, dict) and company.get("name"):
+            return str(company["name"])
+        if isinstance(company, str) and company.strip():
+            return company.strip()
+        return company_endpoint.replace("-", " ").title()
+
+    def fetch_job_by_board_page_url(self, job_page_url: str) -> Optional[JobData]:
+        """
+        Fetch a single JobData from a public Greenhouse job URL using the same API
+        parsing path as fetch_jobs (one GET to the job detail endpoint).
+        """
+        parsed = parse_greenhouse_board_job_url(job_page_url)
+        if not parsed:
+            return None
+        company_endpoint, job_id = parsed
+        self.rate_limiter.wait_if_needed()
+        detail_url = f"{self.base_url}/boards/{company_endpoint}/jobs/{job_id}"
+        try:
+            logger.debug("Fetching Greenhouse job detail from %s", detail_url)
+            response = requests.get(detail_url, timeout=30)
+            response.raise_for_status()
+            job_detail = response.json()
+        except requests.exceptions.RequestException as e:
+            logger.warning("Greenhouse detail fetch failed for %s: %s", job_page_url, e)
+            return None
+        except Exception as e:
+            logger.warning("Greenhouse detail parse failed for %s: %s", job_page_url, e, exc_info=True)
+            return None
+
+        company_name = self._infer_company_name(job_detail, company_endpoint)
+        try:
+            job = self._parse_job(job_detail, company_name, company_endpoint)
+        except Exception as e:
+            logger.warning("Greenhouse _parse_job failed for %s: %s", job_page_url, e, exc_info=True)
+            return None
+
+        content = job_detail.get("content")
+        if content:
+            decoded = html.unescape(content)
+            job.job_description = self._clean_html(decoded)
+        return job
+
     def _clean_html(self, html_content: str) -> str:
         """
         Clean HTML content to extract readable text.

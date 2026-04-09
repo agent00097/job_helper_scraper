@@ -1,0 +1,60 @@
+# RabbitMQ consumer: processes job_scrape_requests and writes via the same DB path as the scheduler.
+# Scale replicas above 1 only if you want competing consumers on the same queue (prefetch-aware).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jobscraper-rabbitmq-worker
+  namespace: harco
+  labels:
+    app: jobscraper-rabbitmq-worker
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: jobscraper-rabbitmq-worker
+  template:
+    metadata:
+      labels:
+        app: jobscraper-rabbitmq-worker
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: rabbitmq-worker
+          image: PLACEHOLDER_IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "rabbitmq_worker_main.py"]
+          envFrom:
+            - configMapRef:
+                name: jobscraper-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-db
+                  key: DB_PASSWORD
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-rabbitmq
+                  key: RABBITMQ_PASSWORD
+            # Optional: if unset, username comes from config/rabbitmq_worker.yaml
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-rabbitmq
+                  key: RABBITMQ_USER
+                  optional: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "768Mi"
+              cpu: "1000m"

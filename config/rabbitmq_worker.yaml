@@ -1,0 +1,14 @@
+# Non-secret RabbitMQ worker settings (checked into the image / repo).
+# Secrets: set RABBITMQ_PASSWORD (required). Optionally override username with RABBITMQ_USER.
+#
+# Override this file path: RABBITMQ_WORKER_CONFIG=/path/to/custom.yaml
+
+
+host: rabbitmq
+port: 5672
+virtual_host: "jobs"
+queue_name: job_scrape_requests
+prefetch_count: 2
+reconnect_delay_seconds: 5
+requeue_on_failure: true
+username: job_worker

@@ -4,3 +4,4 @@ namespace: harco
 resources:
   - configmap.yaml
   - deployment.yaml
+  - deployment-rabbitmq-worker.yaml
