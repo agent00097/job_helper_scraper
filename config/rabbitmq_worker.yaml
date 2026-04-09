@@ -1,8 +1,11 @@
 # Non-secret RabbitMQ worker settings (checked into the image / repo).
-# Secrets: set RABBITMQ_PASSWORD (required). Optionally override username with RABBITMQ_USER.
+# Secrets: RABBITMQ_PASSWORD (required). Optional: RABBITMQ_USER.
 #
-# Override this file path: RABBITMQ_WORKER_CONFIG=/path/to/custom.yaml
-
+# Broker `host` is a fallback when RABBITMQ_HOST is unset. In harco, the Deployment sets
+# RABBITMQ_HOST to the RabbitMQ StatefulSet pod (e.g. rabbitmq-0.rabbitmq-headless.infra...).
+#
+# Optional env overrides: RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_VHOST, RABBITMQ_QUEUE.
+# Override file path: RABBITMQ_WORKER_CONFIG=/path/to/custom.yaml
 
 host: rabbitmq
 port: 5672

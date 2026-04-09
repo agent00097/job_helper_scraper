@@ -34,6 +34,11 @@ spec:
             - configMapRef:
                 name: jobscraper-config
           env:
+            # AMQP host: use the StatefulSet pod DNS from the headless Service (the part after
+            # "rabbit@" in the Erlang node name), not the full "rabbit@..." string.
+            # If you add a ClusterIP Service (e.g. rabbitmq) in infra, prefer that hostname instead.
+            - name: RABBITMQ_HOST
+              value: "rabbitmq-0.rabbitmq-headless.infra.svc.cluster.local"
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
