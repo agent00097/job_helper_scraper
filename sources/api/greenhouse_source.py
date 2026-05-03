@@ -14,9 +14,7 @@ from utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
-# Board / embed pages redirect to the employer's careers site (often behind Cloudflare).
-# Canonical URL for automation is the public JSON API job resource:
-#   https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{id}
+# Recognize board, embed, and API job URLs so queue enrichment can resolve (board_token, job_id).
 GREENHOUSE_JOB_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"^https?://boards-api\.greenhouse\.io/v1/boards/([^/]+)/jobs/(\d+)/?$",
@@ -50,10 +48,10 @@ def parse_greenhouse_board_job_url(url: str) -> Optional[tuple[str, int]]:
     return None
 
 
-def greenhouse_api_job_url(base_url: str, company_endpoint: str, job_id: int) -> str:
-    """Stable Greenhouse JSON URL for a job (no redirect to employer careers domain)."""
-    root = base_url.rstrip("/")
-    return f"{root}/boards/{company_endpoint}/jobs/{job_id}"
+def greenhouse_board_job_url(public_boards_url: str, company_endpoint: str, job_id: int) -> str:
+    """Public board job page URL (e.g. https://boards.greenhouse.io/{board}/jobs/{id})."""
+    root = public_boards_url.rstrip("/")
+    return f"{root}/{company_endpoint}/jobs/{job_id}"
 
 
 class GreenhouseSource(BaseSource):
@@ -72,6 +70,7 @@ class GreenhouseSource(BaseSource):
         super().__init__(name, source_id, config)
         self.rate_limiter = RateLimiter(rate_limit_per_minute)
         self.base_url = config.get("base_url", "https://boards-api.greenhouse.io/v1")
+        self.public_boards_url = config.get("public_boards_url", "https://boards.greenhouse.io")
     
     def fetch_jobs(self, company_endpoint: str, company_name: str) -> List[JobData]:
         """
@@ -146,9 +145,7 @@ class GreenhouseSource(BaseSource):
         if job_id is None:
             raise ValueError("Greenhouse job payload missing id")
         job_id_int = int(job_id)
-        # Use boards-api job URL so automation does not follow redirects to absolute_url
-        # (employer careers sites are often behind Cloudflare).
-        job_url = greenhouse_api_job_url(self.base_url, company_endpoint, job_id_int)
+        job_url = greenhouse_board_job_url(self.public_boards_url, company_endpoint, job_id_int)
         
         # Parse location
         location = None
