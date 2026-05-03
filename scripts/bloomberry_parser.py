@@ -17,6 +17,10 @@ Usage examples:
     --rabbit-vhost jobs \
     --queue job_scrape_requests
 
+  # Same env vars as the Kubernetes worker (optional; CLI flags override):
+  #   export RABBITMQ_HOST=127.0.0.1 RABBITMQ_PORT=5672
+  #   export RABBITMQ_USER=job_worker RABBITMQ_PASSWORD='...' RABBITMQ_VHOST=jobs
+
 You can also paste the raw email via stdin:
 
   python email_to_rabbit.py --dry-run < bloomberry.eml
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import uuid
@@ -100,17 +105,33 @@ class JobEntry:
     source: str = "email_raw_manual"
 
 
+def _rabbit_arg_defaults() -> dict:
+    """Align with workers/rabbitmq_settings.py env names for local publish + port-forward."""
+    return {
+        "host": os.environ.get("RABBITMQ_HOST", "127.0.0.1"),
+        "port": int(os.environ.get("RABBITMQ_PORT", "5672")),
+        "user": os.environ.get("RABBITMQ_USER", "guest"),
+        "password": os.environ.get("RABBITMQ_PASSWORD", "guest"),
+        "vhost": os.environ.get("RABBITMQ_VHOST", "/"),
+    }
+
+
 def parse_args() -> argparse.Namespace:
+    d = _rabbit_arg_defaults()
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw-file", help="Path to raw email file (.eml or pasted raw message)")
     parser.add_argument("--dry-run", action="store_true", help="Print extracted jobs only")
     parser.add_argument("--publish", action="store_true", help="Publish extracted jobs to RabbitMQ")
 
-    parser.add_argument("--rabbit-host", default="127.0.0.1")
-    parser.add_argument("--rabbit-port", type=int, default=5672)
-    parser.add_argument("--rabbit-user", default="guest")
-    parser.add_argument("--rabbit-pass", default="guest")
-    parser.add_argument("--rabbit-vhost", default="/")
+    parser.add_argument("--rabbit-host", default=d["host"], help="Default: RABBITMQ_HOST or 127.0.0.1")
+    parser.add_argument("--rabbit-port", type=int, default=d["port"], help="Default: RABBITMQ_PORT or 5672")
+    parser.add_argument("--rabbit-user", default=d["user"], help="Default: RABBITMQ_USER or guest")
+    parser.add_argument("--rabbit-pass", default=d["password"], help="Default: RABBITMQ_PASSWORD or guest")
+    parser.add_argument(
+        "--rabbit-vhost",
+        default=d["vhost"],
+        help="Default: RABBITMQ_VHOST or / (must match user permissions on the broker)",
+    )
     parser.add_argument("--queue", default="job_scrape_requests")
 
     return parser.parse_args()
@@ -329,7 +350,18 @@ def publish_jobs(
         blocked_connection_timeout=30,
     )
 
-    connection = pika.BlockingConnection(params)
+    try:
+        connection = pika.BlockingConnection(params)
+    except pika.exceptions.ProbableAuthenticationError as e:
+        print(
+            "RabbitMQ refused the login (403 ACCESS_REFUSED). Check username, password, and vhost.\n"
+            "  - vhost must be the one your user is granted on (e.g. 'jobs' not '/' if that is how the broker is set up).\n"
+            "  - Match the same RABBITMQ_USER / RABBITMQ_PASSWORD / RABBITMQ_VHOST as the worker, or pass --rabbit-* flags.\n"
+            f"  - Tried: user={user!r} vhost={vhost!r} host={host!r} port={port}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from e
+
     channel = connection.channel()
 
     channel.queue_declare(queue=queue_name, durable=True)
