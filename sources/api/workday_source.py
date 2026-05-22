@@ -28,6 +28,8 @@ _TIME_TYPE_MAP = {
     "Temporary": "Contract",
 }
 
+_MULTI_LOCATION_RE = re.compile(r"^\d+\s+Locations?$", re.IGNORECASE)
+
 
 def parse_workday_board_url(board_url: str) -> Tuple[str, str, str]:
     """
@@ -155,10 +157,7 @@ class WorkdaySource(BaseSource):
         # Stable ID from the path; slashes replaced so it's a single token.
         job_id = external_path.lstrip("/").replace("/", "_")
 
-        # locationsText is a plain string for single-location jobs but returns a count
-        # string like "6 Locations" for multi-location roles — per-location breakdown
-        # requires a separate API call and is a Phase 2 improvement.
-        location = posting.get("locationsText") or None
+        locations_text = posting.get("locationsText") or None
         date_posted = self._parse_date(posting.get("postedOn"))
 
         # Per-job detail call for description and extra metadata.
@@ -183,13 +182,7 @@ class WorkdaySource(BaseSource):
             remote_allowed = "remote" in remote_type
             hybrid_allowed = "hybrid" in remote_type
 
-            # Use detail location when the list gave us nothing.
-            if not location:
-                req_loc = info.get("jobRequisitionLocation")
-                if isinstance(req_loc, dict):
-                    location = req_loc.get("descriptor") or None
-                elif isinstance(req_loc, str):
-                    location = req_loc or None
+        location = self._resolve_location(locations_text, detail)
 
         # Infer remote/hybrid from location text when API flags are absent.
         if not remote_allowed and not hybrid_allowed and location:
@@ -216,6 +209,40 @@ class WorkdaySource(BaseSource):
             scraped_at=datetime.now(),
             created_at=datetime.now(),
         )
+
+    def _resolve_location(self, locations_text: Optional[str], detail: Optional[Dict]) -> Optional[str]:
+        """Return the best location string for a posting.
+
+        If locations_text is a real place name, return it unchanged.
+        If it is a count string ("6 Locations") or absent, pull location names
+        from the per-job detail response and join them with "; ".
+        """
+        if locations_text and not _MULTI_LOCATION_RE.match(locations_text):
+            return locations_text
+
+        if not detail:
+            return locations_text or None
+
+        info = detail.get("jobPostingInfo") or {}
+        parts: List[str] = []
+
+        req_loc = info.get("jobRequisitionLocation")
+        if isinstance(req_loc, dict):
+            name = req_loc.get("descriptor") or req_loc.get("name") or ""
+            if name:
+                parts.append(name)
+        elif isinstance(req_loc, str) and req_loc.strip():
+            parts.append(req_loc.strip())
+
+        for loc in info.get("additionalLocations") or []:
+            if isinstance(loc, dict):
+                name = loc.get("descriptor") or loc.get("name") or ""
+                if name:
+                    parts.append(name)
+            elif isinstance(loc, str) and loc.strip():
+                parts.append(loc.strip())
+
+        return "; ".join(parts) if parts else (locations_text or None)
 
     def _fetch_detail(self, api_base: str, external_path: str) -> Optional[Dict]:
         """GET the per-job detail endpoint; return parsed JSON or None on failure."""
@@ -317,12 +344,7 @@ class WorkdaySource(BaseSource):
         remote_allowed = "remote" in remote_type
         hybrid_allowed = "hybrid" in remote_type
 
-        location = None
-        req_loc = info.get("jobRequisitionLocation")
-        if isinstance(req_loc, dict):
-            location = req_loc.get("descriptor") or None
-        elif isinstance(req_loc, str):
-            location = req_loc or None
+        location = self._resolve_location(None, detail)
 
         if not remote_allowed and not hybrid_allowed and location:
             loc_lower = location.lower()

@@ -8,8 +8,8 @@ import logging
 from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Mapping, Union
-from urllib.parse import urlparse
 
+import db
 from models import JobData
 from pydantic import BaseModel, HttpUrl, ValidationError
 from sources.api.ashby_source import AshbySource
@@ -17,6 +17,7 @@ from sources.api.greenhouse_source import GreenhouseSource
 from sources.api.lever_source import LeverSource
 from sources.api.workday_source import WorkdaySource
 from sources.source_factory import create_source
+from utils.company_discovery import parse_company_from_url, source_name_for_url
 from utils.deduplication import generate_content_hash, job_exists_by_hash, job_exists_by_url
 from utils.job_storage import save_job
 from utils.source_loader import get_source_config
@@ -85,17 +86,8 @@ def try_enrich_by_url(job: JobData) -> JobData:
     source, the source is disabled/unconfigured, or the API call fails.
     """
     url_str = str(job.url)
-    hostname = (urlparse(url_str).hostname or "").lower()
-
-    if hostname in ("boards.greenhouse.io", "job-boards.greenhouse.io", "boards-api.greenhouse.io"):
-        source_name = "greenhouse"
-    elif hostname == "jobs.ashbyhq.com":
-        source_name = "ashby"
-    elif hostname == "jobs.lever.co":
-        source_name = "lever"
-    elif hostname.endswith(".myworkdayjobs.com"):
-        source_name = "workday"
-    else:
+    source_name = source_name_for_url(url_str)
+    if source_name is None:
         return job
 
     cfg = get_source_config(source_name)
@@ -144,6 +136,60 @@ def persist_scrape_job(job: JobData) -> bool:
     return False
 
 
+def _auto_discover_company(url: str) -> None:
+    """Insert a newly-seen (source, company_endpoint) pair into source_companies.
+
+    Phase 2 wiring — untested pending DB validation.
+
+    Called once per inbound queue message; a discovery failure must never
+    affect job processing, so callers always wrap this in try/except.
+
+    Open question for review: auto-discovered companies are inserted with
+    enabled=TRUE so they are picked up on the next scheduler run. An
+    alternative is enabled=FALSE (manual review before activation).
+    """
+    info = parse_company_from_url(url)
+    if info is None:
+        return
+
+    source_name = info["source"]
+    company_endpoint = info["company_endpoint"]
+    company_name = info["company_name"]
+
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM job_sources WHERE name = %s AND enabled = TRUE",
+                (source_name,),
+            )
+            row = cur.fetchone()
+            if not row:
+                logger.debug(
+                    "Auto-discovery: source %r not found or disabled, skipping %s",
+                    source_name, url,
+                )
+                return
+            source_id = row[0]
+
+            cur.execute(
+                """
+                INSERT INTO source_companies (source_id, company_name, company_endpoint, enabled)
+                VALUES (%s, %s, %s, TRUE)
+                ON CONFLICT (source_id, company_endpoint) DO NOTHING
+                """,
+                (source_id, company_name, company_endpoint),
+            )
+            if cur.rowcount:
+                logger.info(
+                    "Auto-discovered new company: %s (%s via %s)",
+                    company_name, company_endpoint, source_name,
+                )
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def process_job_scrape_request_dict(data: Mapping[str, Any]) -> MessageDisposition:
     """
     Full pipeline for one message body (already decoded JSON object).
@@ -159,6 +205,14 @@ def process_job_scrape_request_dict(data: Mapping[str, Any]) -> MessageDispositi
         return MessageDisposition.NACK_NO_REQUEUE
 
     job = job_data_from_payload(message.payload)
+
+    # Phase 2 — auto-discovery: register new (source, company) pairs seen in
+    # the queue so the scheduler picks them up on its next run.
+    try:
+        _auto_discover_company(str(message.payload.url))
+    except Exception:
+        logger.exception("Auto-discovery failed for %s (non-fatal)", message.payload.url)
+
     try:
         job = try_enrich_by_url(job)
     except Exception:
