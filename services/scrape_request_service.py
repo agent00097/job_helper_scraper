@@ -8,10 +8,14 @@ import logging
 from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Mapping, Union
+from urllib.parse import urlparse
 
 from models import JobData
 from pydantic import BaseModel, HttpUrl, ValidationError
-from sources.api.greenhouse_source import GreenhouseSource, parse_greenhouse_board_job_url
+from sources.api.ashby_source import AshbySource
+from sources.api.greenhouse_source import GreenhouseSource
+from sources.api.lever_source import LeverSource
+from sources.api.workday_source import WorkdaySource
 from sources.source_factory import create_source
 from utils.deduplication import generate_content_hash, job_exists_by_hash, job_exists_by_url
 from utils.job_storage import save_job
@@ -68,20 +72,61 @@ def job_data_from_payload(payload: JobScrapeRequestPayload) -> JobData:
     )
 
 
-def _try_greenhouse_enrich(job: JobData) -> JobData:
-    """If URL is a Greenhouse board job link and API fetch succeeds, replace with API JobData."""
-    if not parse_greenhouse_board_job_url(str(job.url)):
+def try_enrich_by_url(job: JobData) -> JobData:
+    """Inspect job.url, route to the matching source, return an API-enriched JobData.
+
+    Supported hostnames:
+      boards.greenhouse.io / job-boards.greenhouse.io  -> Greenhouse
+      jobs.ashbyhq.com                                 -> Ashby
+      jobs.lever.co                                    -> Lever
+      *.myworkdayjobs.com                              -> Workday
+
+    Falls back to the original job unchanged if the URL doesn't match a known
+    source, the source is disabled/unconfigured, or the API call fails.
+    """
+    url_str = str(job.url)
+    hostname = (urlparse(url_str).hostname or "").lower()
+
+    if hostname in ("boards.greenhouse.io", "job-boards.greenhouse.io", "boards-api.greenhouse.io"):
+        source_name = "greenhouse"
+    elif hostname == "jobs.ashbyhq.com":
+        source_name = "ashby"
+    elif hostname == "jobs.lever.co":
+        source_name = "lever"
+    elif hostname.endswith(".myworkdayjobs.com"):
+        source_name = "workday"
+    else:
         return job
-    cfg = get_source_config("greenhouse")
+
+    cfg = get_source_config(source_name)
     if not cfg or not cfg.get("enabled"):
         return job
+
     source = create_source(cfg)
-    if not isinstance(source, GreenhouseSource):
+    if source is None:
         return job
-    enriched = source.fetch_job_by_board_page_url(str(job.url))
+
+    try:
+        if isinstance(source, GreenhouseSource):
+            enriched = source.fetch_job_by_board_page_url(url_str)
+        elif isinstance(source, (AshbySource, LeverSource, WorkdaySource)):
+            enriched = source.fetch_job_by_url(url_str)
+        else:
+            logger.warning("Source %s has no URL-based enrichment method", type(source).__name__)
+            return job
+    except Exception:
+        logger.exception("%s enrich raised unexpectedly for %s", source_name, url_str)
+        return job
+
     if enriched is None:
-        logger.info("Greenhouse enrich failed; using payload fields for %s", job.url)
+        logger.info("%s enrich returned nothing for %s; keeping payload fields", source_name, url_str)
         return job
+
+    # Preserve company from the email payload when the API response didn't resolve it
+    # (e.g. Workday detail endpoint doesn't include company name).
+    if not enriched.company and job.company:
+        enriched = enriched.model_copy(update={"company": job.company})
+
     return enriched
 
 
@@ -115,9 +160,9 @@ def process_job_scrape_request_dict(data: Mapping[str, Any]) -> MessageDispositi
 
     job = job_data_from_payload(message.payload)
     try:
-        job = _try_greenhouse_enrich(job)
+        job = try_enrich_by_url(job)
     except Exception:
-        logger.exception("Unexpected error during Greenhouse enrich for %s", job.url)
+        logger.exception("Unexpected error during URL enrich for %s", job.url)
         return MessageDisposition.NACK_REQUEUE
 
     try:

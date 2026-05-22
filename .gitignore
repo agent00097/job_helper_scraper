@@ -6,3 +6,8 @@ __pycache__/
 proxies.txt
 working_proxies.txt
 *.log
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
