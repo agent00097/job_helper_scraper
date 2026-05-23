@@ -7,6 +7,7 @@ from datetime import datetime
 import db
 from models import JobData
 from utils.deduplication import is_duplicate_job, generate_content_hash
+from utils.geo import derive_country
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,12 @@ def save_job(job: JobData) -> bool:
                     return False
                 
                 # New job - insert it
+                # Phase 2 wiring — pending DB validation (add_country_code_to_jobs.sql).
+                try:
+                    country_code = derive_country(job.location) if job.location else None
+                except Exception:
+                    country_code = None
+
                 cur.execute("""
                     INSERT INTO jobs (
                         url, job_title, company, location, job_description,
@@ -88,10 +95,11 @@ def save_job(job: JobData) -> bool:
                         education_required, skills_required, application_url,
                         sponsorship_required, citizenship_required, remote_allowed,
                         hybrid_allowed, source_website, job_id_from_source, status,
-                        last_updated, scraped_at, created_at, content_hash
+                        last_updated, scraped_at, created_at, content_hash,
+                        country_code
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                 """, (
                     str(job.url), job.job_title, job.company, job.location,
@@ -101,7 +109,8 @@ def save_job(job: JobData) -> bool:
                     job.sponsorship_required, job.citizenship_required,
                     job.remote_allowed, job.hybrid_allowed, job.source_website,
                     job.job_id_from_source, job.status, job.last_updated,
-                    job.scraped_at, job.created_at, content_hash
+                    job.scraped_at, job.created_at, content_hash,
+                    country_code
                 ))
                 conn.commit()
                 desc_info = f" (description: {len(job.job_description)} chars)" if job.job_description else " (no description)"
