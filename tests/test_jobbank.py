@@ -24,6 +24,7 @@ def main():
         source_id="test-standalone",
         config={"max_pages": MAX_PAGES, "fetch_descriptions": False},
         rate_limit_per_minute=20,
+        skip_db=True,
     )
 
     print(f"Fetching Job Bank (max_pages={MAX_PAGES})…")

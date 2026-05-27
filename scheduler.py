@@ -37,7 +37,12 @@ class Scheduler:
         greenhouse_config = get_source_config("greenhouse")
         if greenhouse_config and greenhouse_config.get("enabled"):
             sources.append(greenhouse_config)
-        
+
+        # Load Job Bank (incremental daily run; backfill uses scripts/jobbank_backfill.py)
+        jobbank_config = get_source_config("jobbank")
+        if jobbank_config and jobbank_config.get("enabled"):
+            sources.append(jobbank_config)
+
         return sources
     
     def should_run_source(self, source_config: dict) -> bool:
