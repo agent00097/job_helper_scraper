@@ -38,6 +38,11 @@ class Scheduler:
         if greenhouse_config and greenhouse_config.get("enabled"):
             sources.append(greenhouse_config)
 
+        # Load Job Bank (incremental daily run; backfill uses scripts/jobbank_backfill.py)
+        jobbank_config = get_source_config("jobbank")
+        if jobbank_config and jobbank_config.get("enabled"):
+            sources.append(jobbank_config)
+
         ashby_config = get_source_config("ashby")
         if ashby_config and ashby_config.get("enabled"):
             sources.append(ashby_config)

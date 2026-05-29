@@ -31,3 +31,4 @@ class JobData(BaseModel):
     last_updated: Optional[datetime] = None
     scraped_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    country_code: Optional[str] = None

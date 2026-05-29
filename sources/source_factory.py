@@ -8,6 +8,7 @@ from sources.api.ashby_source import AshbySource
 from sources.api.greenhouse_source import GreenhouseSource
 from sources.api.lever_source import LeverSource
 from sources.api.workday_source import WorkdaySource
+from sources.scraper.jobbank_source import JobBankSource
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,20 @@ def create_source(source_config: dict) -> Optional[BaseSource]:
             logger.warning(f"Unknown API source: {source_name}")
             return None
     elif source_type == "scraper":
-        logger.info(f"Scraper sources not yet implemented: {source_name}")
-        return None
+        if source_name == "jobbank":
+            return JobBankSource(
+                name=source_name,
+                source_id=source_id,
+                config=config,
+                rate_limit_per_minute=rate_limit,
+                mode=config.get("mode", "incremental"),
+                max_runtime_seconds=int(config.get("max_runtime_seconds", 28800)),
+                max_jobs=int(config.get("max_jobs", 100_000)),
+                skip_db=False,
+            )
+        else:
+            logger.warning(f"Unknown scraper source: {source_name}")
+            return None
     else:
         logger.warning(f"Unknown source type: {source_type}")
         return None
