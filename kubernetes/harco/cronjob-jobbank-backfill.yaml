@@ -1,0 +1,70 @@
+# jobbank-backfill CronJob
+# ─────────────────────────────────────────────────────────────────────────────
+# What: Runs scripts/jobbank_backfill.py nightly to progressively backfill all
+#       historical Job Bank postings (~62 k jobs, ~18 nightly sessions of ~3 500
+#       jobs each). The script auto-resumes from scrape_progress.backfill_last_page
+#       and exits immediately once backfill_completed_at is set — after that this
+#       CronJob becomes a no-op and can be left in place indefinitely.
+#
+# Why separate: The backfill is a slow, long-running (~8 h/night) process that
+#   must not share runtime with the daily incremental scrape. Keeping it as an
+#   independent CronJob means the two paths can never overlap (concurrencyPolicy:
+#   Forbid) and the long-running Deployments are not restarted just to change mode.
+#
+# Lifecycle: Deploy once from feat/jobbank-scraper. When backfill_completed_at is
+#   set (Rushabh confirms via DB), optionally delete this CronJob or leave it — the
+#   script logs "already done" and exits 0. The main branch kustomization can adopt
+#   this manifest on its own merge cycle if desired.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: jobbank-backfill
+  namespace: harco
+  labels:
+    app: jobbank-backfill
+spec:
+  # 11 pm Eastern nightly. spec.timeZone handles DST automatically.
+  # Requires k8s 1.27+; if the cluster is older, change schedule to 0 3 * * *
+  # (UTC equivalent in summer — will drift 1 h in winter without timeZone support).
+  schedule: "0 23 * * *"
+  timeZone: "America/Toronto"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # No retries: the script resumes from scrape_progress.backfill_last_page on the
+      # next scheduled run. An immediate retry would re-hit Job Bank from the same IP
+      # right after a failure — wrong behaviour on a rate-capped scraper.
+      backoffLimit: 0
+      # Safety net above the script's own 28 800 s internal time budget.
+      activeDeadlineSeconds: 30000
+      template:
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: ghcr-pull-secret
+          containers:
+            - name: jobbank-backfill
+              # deploy-jobbank-cronjob.yml replaces PLACEHOLDER_IMAGE before kubectl apply.
+              image: PLACEHOLDER_IMAGE
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-u", "scripts/jobbank_backfill.py"]
+              envFrom:
+                - configMapRef:
+                    name: jobscraper-config
+              env:
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: jobscraper-db
+                      key: DB_PASSWORD
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"

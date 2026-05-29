@@ -1,0 +1,99 @@
+# One-shot deployment workflow for the Job Bank backfill CronJob.
+#
+# Triggered by pushes to feat/jobbank-scraper (and manually via workflow_dispatch).
+# The branch is expected to be deleted after this workflow has deployed the CronJob
+# successfully — at that point this workflow file ceases to exist on the branch and
+# only main's deploy.yml continues to deploy to prod.
+#
+# This workflow deploys ONLY the new CronJob resource. It does NOT touch the
+# long-running jobscraper or jobscraper-rabbitmq-worker Deployments. Those continue
+# to run whatever image they already had; main's deploy workflow will roll them
+# forward on its own merge cycle.
+#
+# Risks intentionally accepted: this is a non-conventional deploy path — deploying
+# to production from a non-main branch without a PR-merge gate. Justified only because
+# the branch is short-lived and the deployed resource is a self-contained, idempotent,
+# resumable CronJob. This pattern should not be replicated for long-lived branches.
+#
+# Note on server branch state: this workflow leaves the server repo checked out on
+# feat/jobbank-scraper. If main is pushed before someone resets the server back to main,
+# deploy.yml's "git reset --hard origin/main" step will fix it automatically — no harm
+# done, but worth knowing when debugging unexpected server state.
+
+name: Deploy Job Bank backfill CronJob
+
+on:
+  push:
+    branches:
+      - feat/jobbank-scraper
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-deploy-cronjob:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image repository (lowercase for GHCR)
+        run: echo "IMAGE_REPO=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tagged with a branch-scoped prefix — never overwrites :latest, so a restart of
+      # the main Deployments cannot accidentally pull this image.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:jobbank-cronjob-${{ github.sha }}
+
+      - name: Verify SSH deploy secrets are non-empty
+        env:
+          HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
+          HETZNER_USER: ${{ secrets.HETZNER_USER }}
+          HETZNER_REPO_PATH: ${{ secrets.HETZNER_REPO_PATH }}
+          HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+        run: |
+          ok=1
+          if [ -z "${HETZNER_HOST// }" ]; then echo "::error::HETZNER_HOST secret is missing or empty"; ok=0; fi
+          if [ -z "${HETZNER_USER// }" ]; then echo "::error::HETZNER_USER secret is missing or empty"; ok=0; fi
+          if [ -z "${HETZNER_REPO_PATH// }" ]; then echo "::error::HETZNER_REPO_PATH secret is missing or empty"; ok=0; fi
+          if [ -z "${HETZNER_SSH_KEY// }" ]; then echo "::error::HETZNER_SSH_KEY secret is missing or empty"; ok=0; fi
+          if [ "$ok" -eq 0 ]; then exit 1; fi
+          echo "HETZNER_HOST is set (length ${#HETZNER_HOST})"
+          echo "HETZNER_USER is set (length ${#HETZNER_USER})"
+          echo "HETZNER_REPO_PATH and HETZNER_SSH_KEY are set (values not printed)"
+
+      - name: Deploy CronJob on Hetzner (SSH + kubectl)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export KUBECONFIG="$HOME/.kube/config"
+            echo "KUBECONFIG=$KUBECONFIG"
+            ls -l "$KUBECONFIG"
+            kubectl config current-context
+            cd "${{ secrets.HETZNER_REPO_PATH }}"
+            git fetch origin feat/jobbank-scraper
+            git checkout feat/jobbank-scraper
+            git reset --hard origin/feat/jobbank-scraper
+            sed "s|PLACEHOLDER_IMAGE|${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:jobbank-cronjob-${{ github.sha }}|g" \
+              kubernetes/harco/cronjob-jobbank-backfill.yaml | kubectl apply -f -
+            kubectl -n harco get cronjob jobbank-backfill -o wide
+            kubectl -n harco describe cronjob jobbank-backfill | head -30
