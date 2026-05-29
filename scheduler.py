@@ -31,7 +31,7 @@ class Scheduler:
         """
         # For now, we'll load sources manually
         # In the future, we can query all enabled sources from database
-        sources = []
+        sources:list = []
         
         # Load Greenhouse
         greenhouse_config = get_source_config("greenhouse")
@@ -43,6 +43,19 @@ class Scheduler:
         if jobbank_config and jobbank_config.get("enabled"):
             sources.append(jobbank_config)
 
+        ashby_config = get_source_config("ashby")
+        if ashby_config and ashby_config.get("enabled"):
+            sources.append(ashby_config)
+
+        lever_config = get_source_config("lever")
+        if lever_config and lever_config.get("enabled"):
+            sources.append(lever_config)
+
+        workday_config = get_source_config("workday")
+        if workday_config and workday_config.get("enabled"):
+            sources.append(workday_config)
+
+        
         return sources
     
     def should_run_source(self, source_config: dict) -> bool:
