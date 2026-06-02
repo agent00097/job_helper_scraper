@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from sources.base_source import BaseSource
 from models import JobData
+from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -110,9 +111,10 @@ class LeverSource(BaseSource):
         if not job_url:
             raise ValueError(f"Lever posting {job_id} has no hostedUrl or applyUrl")
 
+        title = posting.get("text")
         return JobData(
             url=job_url,
-            job_title=posting.get("text"),
+            job_title=title,
             company=company_name,
             location=location,
             job_description=description,
@@ -126,6 +128,7 @@ class LeverSource(BaseSource):
             status="active",
             scraped_at=datetime.now(),
             created_at=datetime.now(),
+            occupation_category=from_title(title or ""),
         )
 
     def _build_description(self, posting: Dict) -> str:

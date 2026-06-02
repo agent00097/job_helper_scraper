@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from models import JobData
 from sources.base_source import BaseSource
+from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -192,9 +193,10 @@ class WorkdaySource(BaseSource):
             elif "hybrid" in loc_lower:
                 hybrid_allowed = True
 
+        title = posting.get("title")
         return JobData(
             url=job_url,
-            job_title=posting.get("title"),
+            job_title=title,
             company=company_name,
             location=location,
             job_description=description,
@@ -208,6 +210,7 @@ class WorkdaySource(BaseSource):
             status="active",
             scraped_at=datetime.now(),
             created_at=datetime.now(),
+            occupation_category=from_title(title or ""),
         )
 
     def _resolve_location(self, locations_text: Optional[str], detail: Optional[Dict]) -> Optional[str]:
@@ -353,9 +356,10 @@ class WorkdaySource(BaseSource):
             elif "hybrid" in loc_lower:
                 hybrid_allowed = True
 
+        title = info.get("title")
         return JobData(
             url=job_url,
-            job_title=info.get("title"),
+            job_title=title,
             company=company_name,
             location=location,
             job_description=description,
@@ -369,6 +373,7 @@ class WorkdaySource(BaseSource):
             status="active",
             scraped_at=datetime.now(),
             created_at=datetime.now(),
+            occupation_category=from_title(title or ""),
         )
 
     def get_rate_limit(self) -> int:

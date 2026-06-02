@@ -46,34 +46,37 @@ def get_source_config(source_name: str) -> Optional[Dict]:
         conn.close()
 
 
-def get_source_companies(source_id: str) -> List[Dict]:
+def get_source_companies(source_name: str) -> List[Dict]:
     """
-    Get all enabled companies for a source.
-    
-    Args:
-        source_id: UUID of the source
-        
-    Returns:
-        List of company dictionaries
+    Get all enabled companies for a source using the post-migration schema.
+
+    source_endpoints is a JSONB column keyed by source name, e.g.
+    {"ashby": "stripe", "workday": "https://stripe.wd5..."}.
+    Returns rows whose source_endpoints map contains the given source_name key.
+
+    Each returned dict exposes .id (company UUID), .company_name, and
+    .company_endpoint (the per-source value from the JSONB map).
     """
     conn = db.get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, company_name, company_endpoint, enabled
+                SELECT id, company_name, normalized_name,
+                       source_endpoints->>%s AS company_endpoint
                 FROM source_companies
-                WHERE source_id = %s AND enabled = TRUE
-            """, (source_id,))
-            
+                WHERE jsonb_exists(source_endpoints, %s)
+                  AND enabled = TRUE
+            """, (source_name, source_name))
+
             companies = []
             for row in cur.fetchall():
                 companies.append({
                     "id": str(row[0]),
                     "company_name": row[1],
-                    "company_endpoint": row[2],
-                    "enabled": row[3]
+                    "normalized_name": row[2],
+                    "company_endpoint": row[3],
                 })
-            
+
             return companies
     finally:
         conn.close()

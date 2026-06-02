@@ -2,7 +2,7 @@
 Utilities for storing jobs in the database.
 """
 import logging
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 import db
 from models import JobData
@@ -12,16 +12,26 @@ from utils.geo import derive_country
 logger = logging.getLogger(__name__)
 
 
-def save_job(job: JobData) -> bool:
+def save_job(
+    job: JobData,
+    source_endpoint: Optional[str] = None,
+) -> bool:
     """
     Save a single job to the database if it's not a duplicate.
-    
-    Args:
-        job: JobData object to save
-        
-    Returns:
-        True if job was saved, False if duplicate or error
+
+    source_endpoint: the ATS-specific company slug/URL (e.g. "stripe" for Ashby).
+    When provided, ensure_company is called to resolve or queue company onboarding.
+    JobBank jobs omit this (no per-company endpoint) and are saved with company_id=NULL.
+
+    Returns True if the job was saved or updated, False if duplicate or error.
     """
+    from services.company_check import ensure_company  # local import avoids circular dep
+
+    # Resolve company_id (or None) before touching the DB transaction
+    company_id = job.company_id
+    if company_id is None and source_endpoint:
+        company_id = ensure_company(job, job.source_website, source_endpoint)
+
     # Generate content hash
     content_hash = generate_content_hash(job)
     
@@ -46,20 +56,24 @@ def save_job(job: JobData) -> bool:
                     # Update the description
                     logger.debug(f"Updating job description for job ID {existing_id}")
                     logger.debug(f"Description to save: {job.job_description[:100] if job.job_description else 'None'}...")
-                    
+
                     cur.execute("""
-                        UPDATE jobs 
+                        UPDATE jobs
                         SET job_description = %s,
                             last_updated = %s,
                             scraped_at = %s,
-                            content_hash = %s
+                            content_hash = %s,
+                            occupation_category = COALESCE(occupation_category, %s),
+                            company_id = COALESCE(company_id, %s)
                         WHERE id = %s
                     """, (
                         job.job_description,
                         job.last_updated,
                         job.scraped_at,
                         content_hash,
-                        existing_id
+                        job.occupation_category,
+                        str(company_id) if company_id else None,
+                        existing_id,
                     ))
                     conn.commit()
                     
@@ -96,10 +110,11 @@ def save_job(job: JobData) -> bool:
                         sponsorship_required, citizenship_required, remote_allowed,
                         hybrid_allowed, source_website, job_id_from_source, status,
                         last_updated, scraped_at, created_at, content_hash,
-                        country_code
+                        country_code, occupation_category, company_id
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s
                     )
                 """, (
                     str(job.url), job.job_title, job.company, job.location,
@@ -110,7 +125,8 @@ def save_job(job: JobData) -> bool:
                     job.remote_allowed, job.hybrid_allowed, job.source_website,
                     job.job_id_from_source, job.status, job.last_updated,
                     job.scraped_at, job.created_at, content_hash,
-                    country_code
+                    country_code, job.occupation_category,
+                    str(company_id) if company_id else None,
                 ))
                 conn.commit()
                 desc_info = f" (description: {len(job.job_description)} chars)" if job.job_description else " (no description)"
@@ -125,23 +141,25 @@ def save_job(job: JobData) -> bool:
         conn.close()
 
 
-def save_jobs(jobs: List[JobData]) -> tuple[int, int]:
+def save_jobs(
+    jobs: List[JobData],
+    source_endpoint: Optional[str] = None,
+) -> tuple[int, int]:
     """
     Save multiple jobs to the database.
-    
-    Args:
-        jobs: List of JobData objects
-        
-    Returns:
-        Tuple of (saved_count, duplicate_count)
+
+    source_endpoint is forwarded to save_job for company resolution;
+    see save_job docstring for details.
+
+    Returns (saved_count, duplicate_count).
     """
     saved_count = 0
     duplicate_count = 0
-    
+
     for job in jobs:
-        if save_job(job):
+        if save_job(job, source_endpoint=source_endpoint):
             saved_count += 1
         else:
             duplicate_count += 1
-    
+
     return saved_count, duplicate_count

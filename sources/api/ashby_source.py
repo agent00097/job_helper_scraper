@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from sources.base_source import BaseSource
 from models import JobData
+from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -99,9 +100,10 @@ class AshbySource(BaseSource):
         if not job_url:
             job_url = f"https://jobs.ashbyhq.com/{company_endpoint}/{job_id}"
 
+        title = job_data.get("title")
         return JobData(
             url=job_url,
-            job_title=job_data.get("title"),
+            job_title=title,
             company=company_name,
             location=location,
             job_description=description,
@@ -115,6 +117,7 @@ class AshbySource(BaseSource):
             status="active",
             scraped_at=datetime.now(),
             created_at=datetime.now(),
+            occupation_category=from_title(title or ""),
         )
 
     def fetch_job_by_url(self, url: str) -> Optional[JobData]:

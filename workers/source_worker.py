@@ -31,8 +31,8 @@ class SourceWorker:
         """
         logger.info(f"Starting worker for source: {self.source.name}")
         
-        # Get all companies for this source
-        companies = get_source_companies(self.source.source_id)
+        # Get all companies for this source (new JSONB schema — keyed by source name)
+        companies = get_source_companies(self.source.name)
         
         if not companies:
             logger.warning(f"No companies found for source: {self.source.name}")
@@ -66,8 +66,9 @@ class SourceWorker:
                 total_jobs_fetched += len(jobs)
                 
                 if jobs:
-                    # Save jobs to database
-                    saved, duplicates = save_jobs(jobs)
+                    # Save jobs to database; pass source_endpoint so ensure_company
+                    # can resolve / queue company onboarding for each job.
+                    saved, duplicates = save_jobs(jobs, source_endpoint=company_endpoint)
                     total_jobs_saved += saved
                     total_jobs_duplicates += duplicates
                     

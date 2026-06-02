@@ -26,6 +26,7 @@ import db
 from models import JobData
 from sources.base_source import BaseSource
 from utils.geo import derive_country
+from utils.occupation_category import from_noc, from_title
 from utils.rate_limiter import RateLimiter
 from utils.job_storage import save_job
 
@@ -154,11 +155,16 @@ class JobBankSource(BaseSource):
                     continue
                 if self.fetch_descriptions:
                     try:
-                        desc = self.fetch_description(str(job.url))
+                        desc, noc = self._fetch_detail_page_data(str(job.url))
                         if desc:
                             job.job_description = desc
+                        job.occupation_category = (
+                            from_noc(noc) if noc else from_title(job.job_title or "")
+                        )
                     except Exception as e:
                         logger.warning("JobBank description fetch failed %s: %s", job.url, e)
+                else:
+                    job.occupation_category = from_title(job.job_title or "")
                 collected.append(job)
 
             logger.info(
@@ -241,11 +247,16 @@ class JobBankSource(BaseSource):
                         continue
                     if self.fetch_descriptions:
                         try:
-                            desc = self.fetch_description(str(job.url))
+                            desc, noc = self._fetch_detail_page_data(str(job.url))
                             if desc:
                                 job.job_description = desc
+                            job.occupation_category = (
+                                from_noc(noc) if noc else from_title(job.job_title or "")
+                            )
                         except Exception as e:
                             logger.warning("JobBank description fetch failed %s: %s", job.url, e)
+                    else:
+                        job.occupation_category = from_title(job.job_title or "")
                     save_job(job)
                 total_saved += 1
 
@@ -474,9 +485,20 @@ class JobBankSource(BaseSource):
     # ------------------------------------------------------------------
 
     def fetch_description(self, job_url: str) -> Optional[str]:
-        """Fetch the full description from a Job Bank detail page.
+        """Fetch full description from a Job Bank detail page (public API).
 
-        Selector: div.job-posting-detail-requirements
+        Wraps _fetch_detail_page_data and discards the NOC code so the
+        existing test interface is unchanged.
+        """
+        desc, _ = self._fetch_detail_page_data(job_url)
+        return desc
+
+    def _fetch_detail_page_data(
+        self, job_url: str
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Fetch description and NOC code from a Job Bank detail page.
+
+        Returns (description, noc_code). Either may be None on failure.
         """
         self.rate_limiter.wait_if_needed()
         time.sleep(random.uniform(0.4, 1.6))
@@ -485,15 +507,40 @@ class JobBankSource(BaseSource):
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
             logger.warning("Job Bank detail fetch failed for %s: %s", job_url, e)
-            return None
+            return None, None
 
         soup = BeautifulSoup(resp.text, "html.parser")
+
         desc_el = soup.find("div", class_="job-posting-detail-requirements")
         if not desc_el:
             logger.warning("Job Bank: no description container at %s", job_url)
-            return None
+        description = desc_el.get_text(separator="\n", strip=True) if desc_el else None
 
-        return desc_el.get_text(separator="\n", strip=True)
+        noc_code = self._extract_noc(soup)
+        return description, noc_code
+
+    @staticmethod
+    def _extract_noc(soup: BeautifulSoup) -> Optional[str]:
+        """Extract the NOC code from a Job Bank detail page.
+
+        Tries definition-list pattern first (most reliable), then a regex
+        scan of the full page text as fallback.
+        """
+        # Definition-list pattern: <dt>NOC</dt><dd>12345</dd>
+        for dt in soup.find_all("dt"):
+            if "noc" in dt.get_text().lower():
+                dd = dt.find_next_sibling("dd")
+                if dd:
+                    m = re.search(r"\b(\d{4,5})\b", dd.get_text())
+                    if m:
+                        return m.group(1)
+
+        # Fallback: regex anywhere in page text
+        m = re.search(r"\bNOC\s*:?\s*(\d{4,5})\b", soup.get_text(), re.IGNORECASE)
+        if m:
+            return m.group(1)
+
+        return None
 
     # ------------------------------------------------------------------
     # Helpers
