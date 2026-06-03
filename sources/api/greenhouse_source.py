@@ -10,6 +10,7 @@ from datetime import datetime, date
 
 from sources.base_source import BaseSource
 from models import JobData
+from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -204,15 +205,13 @@ class GreenhouseSource(BaseSource):
         # Build application URL
         application_url = job_url
         
-        # Note: job_description will be fetched separately in fetch_jobs()
-        # to avoid making too many API calls in the list endpoint
-        
+        title = job_data.get("title")
         job = JobData(
             url=job_url,
-            job_title=job_data.get("title"),
+            job_title=title,
             company=company_name,
             location=location,
-            job_description=None,  # Will be fetched from detail endpoint
+            job_description=None,  # fetched separately in fetch_jobs()
             date_posted=date_posted,
             employment_type=employment_type,
             application_url=application_url,
@@ -222,9 +221,10 @@ class GreenhouseSource(BaseSource):
             job_id_from_source=str(job_id_int),
             status="active",
             scraped_at=datetime.now(),
-            created_at=datetime.now()
+            created_at=datetime.now(),
+            occupation_category=from_title(title or ""),
         )
-        
+
         return job
     
     def _fetch_job_description(self, company_endpoint: str, job_id: Optional[int]) -> Optional[str]:

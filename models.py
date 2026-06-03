@@ -2,6 +2,7 @@
 Pydantic models for job data.
 """
 from typing import Optional, List
+from uuid import UUID
 from datetime import date, datetime
 from pydantic import BaseModel, HttpUrl, Field
 
@@ -32,3 +33,5 @@ class JobData(BaseModel):
     scraped_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     country_code: Optional[str] = None
+    occupation_category: Optional[str] = None
+    company_id: Optional[UUID] = None
