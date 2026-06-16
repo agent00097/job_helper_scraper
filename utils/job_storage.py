@@ -8,6 +8,7 @@ import db
 from models import JobData
 from utils.deduplication import is_duplicate_job, generate_content_hash
 from utils.geo import derive_country
+from utils.role_classifier import classify_role
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,13 @@ def save_job(
                     logger.debug(f"Updating job description for job ID {existing_id}")
                     logger.debug(f"Description to save: {job.job_description[:100] if job.job_description else 'None'}...")
 
+                    # Phase 3 wiring — pending DB validation (add_role_function_to_jobs.sql).
+                    try:
+                        _rc = classify_role(job.job_title or "", getattr(job, 'noc_code', None))
+                        role_function = _rc.get("role_function")
+                    except Exception:
+                        role_function = None
+
                     cur.execute("""
                         UPDATE jobs
                         SET job_description = %s,
@@ -64,6 +72,7 @@ def save_job(
                             scraped_at = %s,
                             content_hash = %s,
                             occupation_category = COALESCE(occupation_category, %s),
+                            role_function = COALESCE(role_function, %s),
                             company_id = COALESCE(company_id, %s)
                         WHERE id = %s
                     """, (
@@ -72,6 +81,7 @@ def save_job(
                         job.scraped_at,
                         content_hash,
                         job.occupation_category,
+                        role_function,
                         str(company_id) if company_id else None,
                         existing_id,
                     ))
@@ -102,6 +112,13 @@ def save_job(
                 except Exception:
                     country_code = None
 
+                # Phase 3 wiring — pending DB validation (add_role_function_to_jobs.sql).
+                try:
+                    _rc = classify_role(job.job_title or "", getattr(job, 'noc_code', None))
+                    role_function = _rc.get("role_function")
+                except Exception:
+                    role_function = None
+
                 cur.execute("""
                     INSERT INTO jobs (
                         url, job_title, company, location, job_description,
@@ -110,11 +127,11 @@ def save_job(
                         sponsorship_required, citizenship_required, remote_allowed,
                         hybrid_allowed, source_website, job_id_from_source, status,
                         last_updated, scraped_at, created_at, content_hash,
-                        country_code, occupation_category, company_id
+                        country_code, occupation_category, role_function, company_id
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s
+                        %s, %s, %s
                     )
                 """, (
                     str(job.url), job.job_title, job.company, job.location,
@@ -125,7 +142,7 @@ def save_job(
                     job.remote_allowed, job.hybrid_allowed, job.source_website,
                     job.job_id_from_source, job.status, job.last_updated,
                     job.scraped_at, job.created_at, content_hash,
-                    country_code, job.occupation_category,
+                    country_code, job.occupation_category, role_function,
                     str(company_id) if company_id else None,
                 ))
                 conn.commit()
