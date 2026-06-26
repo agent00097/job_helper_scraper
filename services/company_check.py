@@ -20,6 +20,7 @@ import db
 import pika
 from models import JobData
 from utils.company_normalization import normalize_company_name
+from utils.domain_resolver import is_junk_slug, resolve_domain
 from workers.rabbitmq_settings import load_rabbitmq_worker_settings
 
 logger = logging.getLogger(__name__)
@@ -56,12 +57,27 @@ def ensure_company(
         return company_id
 
     # --- Not found: publish onboarding event ---
+    domain_hint = None
+    try:
+        if is_junk_slug(source_endpoint, job_data.company or ""):
+            logger.debug(
+                "ensure_company: skipping domain resolution for junk slug %r",
+                source_endpoint,
+            )
+        else:
+            domain_hint = resolve_domain(job_data.company or "", source_endpoint)
+    except Exception:
+        logger.warning(
+            "ensure_company: domain resolution raised unexpectedly for %r", source_endpoint
+        )
+        domain_hint = None
+
     payload = {
         "company_name": job_data.company,
         "normalized_name": normalized,
         "source_name": source_name,
         "source_endpoint": source_endpoint,
-        "domain_hint": None,
+        "domain_hint": domain_hint,
     }
     try:
         _publish_onboarding(payload)
