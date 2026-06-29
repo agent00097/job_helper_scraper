@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from utils.domain_resolver import (
+    _looks_like_org,
     _normalize_slug,
     _slug_variants,
     is_junk_slug,
@@ -280,3 +281,93 @@ class TestGracefulFailure:
             result = resolve_domain("The Group", "the-group")
         mock_get.assert_not_called()
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Org-priority pass — .org preferred for nonprofit/institutional companies
+# ---------------------------------------------------------------------------
+
+class TestOrgPriority:
+    # --- _looks_like_org ---
+
+    def test_aclu_is_org(self):
+        assert _looks_like_org("ACLU - National Office", "aclu") is True
+
+    def test_smithsonian_institute_is_org(self):
+        assert _looks_like_org("Smithsonian Institute", "smithsonian") is True
+
+    def test_wikimedia_foundation_is_org(self):
+        assert _looks_like_org("Wikimedia Foundation", "wikimedia") is True
+
+    def test_stripe_is_not_org(self):
+        assert _looks_like_org("Stripe", "stripe") is False
+
+    def test_apollo_is_not_org(self):
+        assert _looks_like_org("Apollo", "apollo") is False
+
+    def test_marker_in_slug_detected(self):
+        # "doctors-without-borders-usa" has no marker, but "msf-foundation" does
+        assert _looks_like_org("MSF", "msf-foundation") is True
+
+    # --- resolve_domain behaviour ---
+
+    def test_org_wins_over_com_when_both_verify(self):
+        """.org is returned even though .com would also have verified."""
+        def _side(url, **kw):
+            if url in ("https://aclu.org", "https://aclu.com"):
+                return _html_response("ACLU - American Civil Liberties Union")
+            return _html_response(status=404)
+
+        with patch("utils.domain_resolver.requests.get", side_effect=_side):
+            result = resolve_domain("ACLU - National Office", "aclu")
+
+        assert result == "aclu.org"
+
+    def test_org_tried_before_com_for_org_company(self):
+        """.org URL appears in the call log before .com for org-looking names."""
+        call_log: list[str] = []
+
+        def _side(url, **kw):
+            call_log.append(url)
+            if url == "https://aclu.org":
+                return _html_response("ACLU - American Civil Liberties Union")
+            return _html_response(status=404)
+
+        with patch("utils.domain_resolver.requests.get", side_effect=_side):
+            resolve_domain("ACLU - National Office", "aclu")
+
+        org_idx = next(i for i, u in enumerate(call_log) if u == "https://aclu.org")
+        com_urls = [i for i, u in enumerate(call_log) if u == "https://aclu.com"]
+        assert not com_urls or org_idx < com_urls[0]
+
+    def test_non_org_company_no_org_tried(self):
+        """For a plain commercial company, .org is never fetched before .com."""
+        with patch("utils.domain_resolver.requests.get") as mock_get:
+            mock_get.return_value = _html_response("Stripe - Payment Infrastructure")
+            resolve_domain("Stripe", "stripe")
+
+        urls_called = [c.args[0] for c in mock_get.call_args_list]
+        # The first URL tried must be .com, and no .org appears before it
+        assert urls_called[0] == "https://stripe.com"
+        assert not any(u.endswith(".org") for u in urls_called)
+
+    def test_org_company_falls_through_to_com_when_org_fails(self):
+        """If .org doesn't verify, the resolver falls through to .com normally."""
+        def _side(url, **kw):
+            if url == "https://aclu.org":
+                return _html_response(status=404)
+            if url == "https://aclu.com":
+                return _html_response("ACLU - American Civil Liberties Union")
+            return _html_response(status=404)
+
+        with patch("utils.domain_resolver.requests.get", side_effect=_side):
+            result = resolve_domain("ACLU - National Office", "aclu")
+
+        assert result == "aclu.com"
+
+    def test_non_org_still_returns_com(self):
+        """Regression: a normal .com company is unaffected by the org-priority pass."""
+        with patch("utils.domain_resolver.requests.get") as mock_get:
+            mock_get.return_value = _html_response("Adyen - Financial Technology")
+            result = resolve_domain("Adyen", "adyen")
+        assert result == "adyen.com"

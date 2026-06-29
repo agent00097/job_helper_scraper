@@ -42,6 +42,20 @@ _JUNK_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ORG_MARKERS = {
+    "aclu", "foundation", "institute", "association", "alliance", "coalition",
+    "society", "council", "committee", "union", "charity", "nonprofit", "ngo",
+    "museum", "university", "college", "hospital", "initiative", "federation",
+    "fund", "trust", "network",
+}
+
+
+def _looks_like_org(company_name: str, slug: str) -> bool:
+    """True if the company name/slug carries nonprofit/institutional markers."""
+    toks = set(re.split(r"[\s\-_]+", (company_name + " " + slug).lower()))
+    toks = {re.sub(r"[^a-z0-9]", "", t) for t in toks}
+    return bool(toks & _ORG_MARKERS)
+
 
 def is_junk_slug(slug: str, company_name: str) -> bool:
     """Return True for slugs that clearly don't belong to real companies."""
@@ -166,6 +180,12 @@ def resolve_domain(company_name: str, slug: str) -> str | None:
     distinctive = _distinctive_words(company_name, base)
     if not distinctive:
         return None
+
+    # Org-priority pass: nonprofit/institutional names get .org ahead of .com
+    if _looks_like_org(company_name, base):
+        for variant in variants:
+            if _fetch_and_verify(f"https://{variant}.org", distinctive):
+                return f"{variant}.org"
 
     # Pass 1: .com variants (preferred)
     for variant in variants:
