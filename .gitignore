@@ -15,3 +15,4 @@ data/onet_raw/
 data/sample_jobs.csv
 scripts/test_3_jobs.py
 scripts/eval_role_classifier.py
+scripts/verify_fixes.py

@@ -4,7 +4,7 @@ All HTTP calls are mocked — no real network access.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -28,9 +28,21 @@ def _html_response(title: str = "", status: int = 200, ct: str = "text/html; cha
     return resp
 
 
-def _no_response() -> MagicMock:
-    """Simulate a connection failure."""
-    raise ConnectionError("unreachable")
+def _meta_response(*, og_site_name: str = "", description: str = "", title: str = "") -> MagicMock:
+    """Build a mock response with fine-grained meta tag control."""
+    parts = []
+    if title:
+        parts.append(f"<title>{title}</title>")
+    if og_site_name:
+        parts.append(f'<meta property="og:site_name" content="{og_site_name}" />')
+    if description:
+        parts.append(f'<meta name="description" content="{description}" />')
+    html = f"<html><head>{''.join(parts)}</head></html>"
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.headers = {"Content-Type": "text/html"}
+    resp.text = html
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +54,6 @@ class TestNormalizeSlug:
         assert _normalize_slug("Stripe") == "stripe"
 
     def test_drops_non_alnum_hyphen(self):
-        # Underscores, dots, slashes removed; hyphens kept
         assert _normalize_slug("acme_corp.io") == "acmecorpio"
 
     def test_keeps_hyphens(self):
@@ -60,21 +71,18 @@ class TestSlugVariants:
         assert variants[0] == "acme-jobs"  # base first
 
     def test_strips_careers_suffix(self):
-        variants = _slug_variants("techcorp-careers")
-        assert "techcorp" in variants
+        assert "techcorp" in _slug_variants("techcorp-careers")
 
     def test_strips_inc_suffix(self):
         assert "myco" in _slug_variants("myco-inc")
 
     def test_no_strip_when_result_too_short(self):
         # "a-jobs": len=6, len("jobs")+2=6, 6 > 6 is False → no strip
-        variants = _slug_variants("a-jobs")
-        assert variants == ["a-jobs"]
+        assert _slug_variants("a-jobs") == ["a-jobs"]
 
     def test_base_longer_than_suffix_boundary_strips(self):
         # "ab-jobs": len=7, 7 > 6 → strips to "ab"
-        variants = _slug_variants("ab-jobs")
-        assert "ab" in variants
+        assert "ab" in _slug_variants("ab-jobs")
 
     def test_no_duplicate_in_variants(self):
         variants = _slug_variants("stripe")
@@ -90,7 +98,6 @@ class TestIsJunkSlug:
         assert is_junk_slug("", "Acme Inc") is True
 
     def test_hex_hash_slug(self):
-        # 32-char hex string, no word structure
         assert is_junk_slug("3a8c9d2b1f4e5a8c9d2b1f4e5a8c9d2b", "Acme") is True
 
     def test_uuid_slug(self):
@@ -112,7 +119,6 @@ class TestIsJunkSlug:
         assert is_junk_slug("acme-global-corp", "Acme Global Corp") is False
 
     def test_long_but_non_hex_slug_not_junk(self):
-        # > 30 chars but contains non-hex letters — not a hex hash
         assert is_junk_slug("acme-international-technology-solutions", "Acme Intl") is False
 
 
@@ -153,29 +159,64 @@ class TestComPreferredOverAltTld:
 
 
 # ---------------------------------------------------------------------------
-# Verification logic
+# Verification — strong vs weak signal split
 # ---------------------------------------------------------------------------
 
-class TestVerification:
-    def test_rejects_page_without_distinctive_word(self):
-        """A page whose title has nothing to do with the company should be rejected."""
-        with patch("utils.domain_resolver.requests.get") as mock_get:
-            mock_get.return_value = _html_response("Welcome to Our Website")
-            result = resolve_domain("Stripe", "stripe")
-        assert result is None
-
-    def test_accepts_title_containing_company_name(self):
+class TestStrongWeakSignals:
+    def test_title_match_verifies(self):
+        """Distinctive word in <title> (strong) → accepted."""
         with patch("utils.domain_resolver.requests.get") as mock_get:
             mock_get.return_value = _html_response("Stripe - Payments Infrastructure")
             result = resolve_domain("Stripe", "stripe")
         assert result == "stripe.com"
 
-    def test_accepts_slug_word_in_title(self):
-        """Even if company_name is generic, slug token in title should pass."""
+    def test_og_site_name_match_verifies(self):
+        """Distinctive word in og:site_name (strong) → accepted."""
         with patch("utils.domain_resolver.requests.get") as mock_get:
-            mock_get.return_value = _html_response("Anthropic - AI Safety")
-            result = resolve_domain("Anthropic", "anthropic")
-        assert result == "anthropic.com"
+            mock_get.return_value = _meta_response(og_site_name="Stripe")
+            result = resolve_domain("Stripe", "stripe")
+        assert result == "stripe.com"
+
+    def test_description_only_does_not_verify(self):
+        """Distinctive word ONLY in description (weak) → rejected.
+
+        Regression: the old code accepted any match anywhere in the pooled signals,
+        so a wrong domain whose description mentioned the target company would
+        incorrectly verify (e.g. aclu.com describing 'ACLU' in its meta description).
+        """
+        with patch("utils.domain_resolver.requests.get") as mock_get:
+            mock_get.return_value = _meta_response(
+                title="Welcome",
+                description="Apollo Sales Intelligence Platform",
+            )
+            result = resolve_domain("Apollo", "apollo")
+        assert result is None
+
+    def test_apollo_title_verifies(self):
+        """A page whose <title> is 'Apollo.io — Sales Intelligence' verifies for
+        company 'Apollo' slug 'apollo' because the strong signal matches."""
+        with patch("utils.domain_resolver.requests.get") as mock_get:
+            mock_get.return_value = _html_response("Apollo.io — Sales Intelligence")
+            result = resolve_domain("Apollo", "apollo")
+        assert result == "apollo.com"
+
+    def test_unrelated_company_page_rejected(self):
+        """A page about a completely different company does not verify for the target.
+
+        Simulates the wrong-domain scenario: we're resolving 'ACLU - National Office'
+        (slug 'aclu') and hit a page whose title is 'Apollo Tyres — Global Leader'.
+        'aclu' does not appear in that title, so it correctly rejects.
+        """
+        with patch("utils.domain_resolver.requests.get") as mock_get:
+            mock_get.return_value = _html_response("Apollo Tyres — Global Leader in Tires")
+            result = resolve_domain("ACLU - National Office", "aclu")
+        assert result is None
+
+    def test_rejects_page_without_any_distinctive_word(self):
+        with patch("utils.domain_resolver.requests.get") as mock_get:
+            mock_get.return_value = _html_response("Welcome to Our Website")
+            result = resolve_domain("Stripe", "stripe")
+        assert result is None
 
     def test_rejects_non_html_content_type(self):
         with patch("utils.domain_resolver.requests.get") as mock_get:
@@ -193,20 +234,11 @@ class TestVerification:
             result = resolve_domain("Stripe", "stripe")
         assert result is None
 
-    def test_og_site_name_used_for_verification(self):
-        html = (
-            '<html><head>'
-            '<meta property="og:site_name" content="Stripe" />'
-            '</head></html>'
-        )
+    def test_accepts_slug_word_in_title(self):
         with patch("utils.domain_resolver.requests.get") as mock_get:
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.headers = {"Content-Type": "text/html"}
-            resp.text = html
-            mock_get.return_value = resp
-            result = resolve_domain("Stripe", "stripe")
-        assert result == "stripe.com"
+            mock_get.return_value = _html_response("Anthropic - AI Safety")
+            result = resolve_domain("Anthropic", "anthropic")
+        assert result == "anthropic.com"
 
     def test_suffix_stripped_variant_resolves(self):
         """acme-jobs → tries acme-jobs.com first, then acme.com."""
@@ -243,9 +275,8 @@ class TestGracefulFailure:
         assert result is None
 
     def test_returns_none_for_all_stopword_company(self):
-        """If company name yields no distinctive words, bail early without network calls."""
+        """No distinctive words → bail early without any network calls."""
         with patch("utils.domain_resolver.requests.get") as mock_get:
-            # "The Group" → tokens: "the" (stopword), "group" (stopword) → no distinctive words
             result = resolve_domain("The Group", "the-group")
         mock_get.assert_not_called()
         assert result is None

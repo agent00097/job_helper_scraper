@@ -83,44 +83,56 @@ def _distinctive_words(company_name: str, slug: str) -> set[str]:
     return tokens
 
 
-def _extract_signals(html: str) -> str:
-    """Pull title + key meta tag contents into one lowercased string."""
-    signals: list[str] = []
+def _extract_signals(html: str) -> tuple[str, str]:
+    """Extract page signals; returns (strong, weak).
+
+    strong = <title> + og:site_name + og:title   — ownership signals
+    weak   = application-name + description       — mention signals only
+    """
+    strong_parts: list[str] = []
+    weak_parts: list[str] = []
 
     m = re.search(r"<title[^>]*>([^<]{0,300})</title>", html, re.IGNORECASE)
     if m:
-        signals.append(m.group(1))
+        strong_parts.append(m.group(1))
 
     for meta_tag in re.finditer(r"<meta\b[^>]*>", html, re.IGNORECASE):
         tag = meta_tag.group()
         matched = False
-        for attr, values in (
-            ("property", ("og:site_name", "og:title")),
-            ("name", ("application-name", "description")),
+        for attr, target, bucket in (
+            ("property", "og:site_name", strong_parts),
+            ("property", "og:title", strong_parts),
+            ("name", "application-name", weak_parts),
+            ("name", "description", weak_parts),
         ):
-            for target in values:
-                if re.search(
-                    rf'\b{attr}\s*=\s*["\']?{re.escape(target)}["\']?',
+            if re.search(
+                rf'\b{attr}\s*=\s*["\']?{re.escape(target)}["\']?',
+                tag,
+                re.IGNORECASE,
+            ):
+                cm = re.search(
+                    r'\bcontent\s*=\s*["\']([^"\']{0,300})["\']',
                     tag,
                     re.IGNORECASE,
-                ):
-                    cm = re.search(
-                        r'\bcontent\s*=\s*["\']([^"\']{0,300})["\']',
-                        tag,
-                        re.IGNORECASE,
-                    )
-                    if cm:
-                        signals.append(cm.group(1))
-                    matched = True
-                    break
+                )
+                if cm:
+                    bucket.append(cm.group(1))
+                matched = True
+                break
             if matched:
                 break
 
-    return " ".join(signals).lower()
+    return " ".join(strong_parts).lower(), " ".join(weak_parts).lower()
 
 
 def _fetch_and_verify(url: str, distinctive: set[str]) -> bool:
-    """Fetch *url* and return True iff it looks like the target company's page."""
+    """Fetch *url* and return True iff it looks like the target company's page.
+
+    A distinctive word must appear in the STRONG signals (title / og:site_name /
+    og:title).  A match only in weak signals (description / application-name) is
+    insufficient — that pattern leaks on wrong-domain pages that merely mention
+    the target company name in their description.
+    """
     try:
         resp = requests.get(
             url,
@@ -136,8 +148,8 @@ def _fetch_and_verify(url: str, distinctive: set[str]) -> bool:
     if "text/html" not in resp.headers.get("Content-Type", ""):
         return False
 
-    signals = _extract_signals(resp.text)
-    return any(word in signals for word in distinctive)
+    strong, _ = _extract_signals(resp.text)
+    return any(word in strong for word in distinctive)
 
 
 def resolve_domain(company_name: str, slug: str) -> str | None:

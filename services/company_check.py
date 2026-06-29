@@ -59,13 +59,14 @@ def ensure_company(
     # --- Not found: publish onboarding event ---
     domain_hint = None
     try:
-        if is_junk_slug(source_endpoint, job_data.company or ""):
+        handle = _company_handle(source_name, source_endpoint)
+        if is_junk_slug(handle, job_data.company or ""):
             logger.debug(
                 "ensure_company: skipping domain resolution for junk slug %r",
-                source_endpoint,
+                handle,
             )
         else:
-            domain_hint = resolve_domain(job_data.company or "", source_endpoint)
+            domain_hint = resolve_domain(job_data.company or "", handle)
     except Exception:
         logger.warning(
             "ensure_company: domain resolution raised unexpectedly for %r", source_endpoint
@@ -97,6 +98,22 @@ def ensure_company(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _company_handle(source_name: str, source_endpoint: str) -> str:
+    """Bare company handle for domain resolution.
+
+    Most ATS sources store the slug directly in source_endpoint (e.g. "stripe").
+    Workday stores a full board URL (e.g. "https://stripe.wd5.myworkdayjobs.com/careers");
+    the first subdomain label is the tenant name we want.
+    """
+    if source_name == "workday":
+        from urllib.parse import urlparse
+        host = urlparse(source_endpoint).hostname or ""
+        parts = host.split(".")
+        if parts and parts[0]:
+            return parts[0]
+    return source_endpoint
+
 
 def _lookup_company(normalized_name: str) -> Optional[UUID]:
     conn = db.get_db_connection()
