@@ -68,7 +68,8 @@ class WorkdaySource(BaseSource):
             tenant, dc, site = parse_workday_board_url(company_endpoint)
         except ValueError as e:
             logger.error("Invalid Workday company_endpoint for %s: %s", company_name, e)
-            return []
+            # Raise so the worker does not archive on bad config / failed fetch.
+            raise
 
         base_host = f"https://{tenant}.{dc}.myworkdayjobs.com"
         api_base = f"{base_host}/wday/cxs/{tenant}/{site}"
@@ -130,7 +131,9 @@ class WorkdaySource(BaseSource):
                     "Workday list fetch failed at offset %d for %s: %s",
                     offset, company_name, e,
                 )
-                break
+                # Never return a partial page set — presence reconcile would
+                # incorrectly archive jobs on later pages.
+                raise
 
             page = data.get("jobPostings") or []
             all_postings.extend(page)

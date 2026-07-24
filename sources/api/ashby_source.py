@@ -55,7 +55,8 @@ class AshbySource(BaseSource):
 
         except requests.exceptions.RequestException as e:
             logger.warning(f"Error fetching Ashby jobs for {company_name}: {e}")
-            return []
+            # Raise so the worker does not archive the company's open jobs on failure.
+            raise
 
     def _parse_job(self, job_data: Dict, company_name: str, company_endpoint: str) -> Optional[JobData]:
         job_id = job_data.get("id")

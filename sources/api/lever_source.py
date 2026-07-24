@@ -63,7 +63,8 @@ class LeverSource(BaseSource):
 
         except requests.exceptions.RequestException as e:
             logger.warning(f"Error fetching Lever jobs for {company_name}: {e}")
-            return []
+            # Raise so the worker does not archive the company's open jobs on failure.
+            raise
 
     def _parse_job(self, posting: Dict, company_name: str) -> Optional[JobData]:
         job_id = posting.get("id")

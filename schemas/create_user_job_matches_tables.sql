@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS user_match_state (
     user_id UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
     last_matched_at TIMESTAMPTZ,
     last_match_reason TEXT,
-    match_cap INT NOT NULL DEFAULT 200,
+    match_cap INT NOT NULL DEFAULT 500,
     scroll_depth INT NOT NULL DEFAULT 0,
     expand_requested BOOLEAN NOT NULL DEFAULT FALSE,
     candidate_window_days INT NOT NULL DEFAULT 60,
