@@ -12,3 +12,6 @@ data:
   DB_USER: "resume_user"
   # CloudNativePG in-cluster: prefer TLS; set to disable only if your operator setup requires it
   PGSSLMODE: "prefer"
+  # Skill extraction on scrape (writes job_skills). Embeddings need OPENAI_API_KEY secret.
+  SKILL_EXTRACTION_ENABLED: "true"
+  SKILL_EXTRACTION_EMBEDDINGS: "true"

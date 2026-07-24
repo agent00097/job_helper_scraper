@@ -162,6 +162,7 @@ All deploy-related values are **repository secrets** (no repository variables re
 | `HETZNER_USER` | SSH user (must have `kubectl` and kubeconfig for the cluster). |
 | `HETZNER_SSH_KEY` | Private key for that user (cluster API is not exposed to GitHub). |
 | `HETZNER_REPO_PATH` | Absolute path to this repo on the server (e.g. `/home/deploy/job-helper-scraper`) for `cd` before `git fetch` / deploy. |
+| `OPENAI_API_KEY` | Optional but recommended. Synced to cluster secret `jobscraper-openai` for skill-extraction embeddings. Without it, scrape still extracts skills via alias matching only. |
 
 `GITHUB_TOKEN` is provided automatically for GHCR login and push.
 
@@ -176,7 +177,8 @@ Triggers on **every push to `main`** (see [`.github/workflows/deploy.yml`](.gith
 1. Builds the image from the repo root [`Dockerfile`](Dockerfile).
 2. Pushes to GHCR as `ghcr.io/<lowercase-owner>/<repo>:<sha>` and `:latest`.
 3. SSHs to Hetzner, **`cd` to the server checkout** (secret `HETZNER_REPO_PATH`), `git fetch` / `git reset --hard origin/main`.
-4. Runs [`kubernetes/harco/deploy.sh`](kubernetes/harco/deploy.sh) with the **commit SHA image** only (`...:<github.sha>`), not `:latest`.
+4. Syncs OpenAI key into `harco/jobscraper-openai` when `OPENAI_API_KEY` is set ([`sync-jobscraper-openai-secret.sh`](kubernetes/scripts/sync-jobscraper-openai-secret.sh)).
+5. Runs [`kubernetes/harco/deploy.sh`](kubernetes/harco/deploy.sh) with the **commit SHA image** only (`...:<github.sha>`), not `:latest`.
 
 **Why manifests from the server repo:** the same files you version in Git are what `kubectl apply` uses after `git reset --hard origin/main`, so deploys stay reproducible and match `main`. The Deployment manifest keeps a `PLACEHOLDER_IMAGE`; `deploy.sh` **`sed`-substitutes the real `ghcr.io/...:<sha>`** and pipes YAML to `kubectl apply`, so Kubernetes never needs a manual `kubectl set image` and the running tag is always the SHA built in that workflow run.
 
@@ -186,22 +188,24 @@ Kubernetes API access stays on the server only.
 
 ### Resource requests and limits
 
-In [`kubernetes/harco/deployment.yaml`](kubernetes/harco/deployment.yaml): **requests** `cpu: 100m`, `memory: 256Mi`; **limits** `cpu: 1000m`, `memory: 768Mi`. Rationale: keep a small baseline on a single-node host while allowing bursts during HTTP fetches and DB writes; the memory limit headroom reduces OOM risk when descriptions or batches are large.
+In [`kubernetes/harco/deployment.yaml`](kubernetes/harco/deployment.yaml): **requests** `cpu: 100m`, `memory: 256Mi`; **limits** `cpu: 750m`, `memory: 1Gi`. Rationale: keep a small baseline on a single-node host while allowing bursts during HTTP fetches, DB writes, and skill embedding loads.
 
 ### Kubernetes objects (namespace `harco`)
 
 | Object | Name | Role |
 |--------|------|------|
-| ConfigMap | `jobscraper-config` | Non-secret DB settings + `PGSSLMODE` |
+| ConfigMap | `jobscraper-config` | Non-secret DB settings + `PGSSLMODE` + skill-extraction flags |
 | Secret | `jobscraper-db` | `DB_PASSWORD` only (sync from `infra/pg-app-db`) |
+| Secret | `jobscraper-openai` | `OPENAI_API_KEY` (optional; from GitHub secret via deploy) |
 | Deployment | `jobscraper` | Single replica; `imagePullSecrets: ghcr-pull-secret` |
 
 There is **no Service** or **Ingress** in this repository.
 
 **Effective container environment** (Kubernetes):
 
-- From ConfigMap `jobscraper-config`: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `PGSSLMODE`
+- From ConfigMap `jobscraper-config`: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `PGSSLMODE`, `SKILL_EXTRACTION_*`
 - From Secret `jobscraper-db` key `DB_PASSWORD`: `DB_PASSWORD`
+- From Secret `jobscraper-openai` key `OPENAI_API_KEY` (optional): `OPENAI_API_KEY`
 
 ### Operations
 

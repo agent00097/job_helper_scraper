@@ -43,13 +43,21 @@ spec:
                 secretKeyRef:
                   name: jobscraper-db
                   key: DB_PASSWORD
+            # Optional: phrase→skill embeddings. Synced from GitHub secret OPENAI_API_KEY
+            # via kubernetes/scripts/sync-jobscraper-openai-secret.sh during deploy.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-openai
+                  key: OPENAI_API_KEY
+                  optional: true
           # Bursts during scrapes (HTTP + DB); limits cap noisy neighbor impact on a single-node k3s host.
           resources:
             requests:
               memory: "256Mi"
               cpu: "100m"
             limits:
-              memory: "768Mi"
+              memory: "1Gi"
               cpu: "750m"
           # No liveness/readiness probes: this process is not an HTTP server. Crash/hang
           # handling is documented in README (avoid fake HTTP probes; exec probes can

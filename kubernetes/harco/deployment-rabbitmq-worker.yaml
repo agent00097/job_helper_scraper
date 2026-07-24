@@ -56,10 +56,17 @@ spec:
                   name: jobscraper-rabbitmq
                   key: RABBITMQ_USER
                   optional: true
+            # Optional: phrase→skill embeddings (same secret as scheduler deployment).
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-openai
+                  key: OPENAI_API_KEY
+                  optional: true
           resources:
             requests:
               memory: "256Mi"
               cpu: "50m"
             limits:
-              memory: "768Mi"
+              memory: "1Gi"
               cpu: "750m"

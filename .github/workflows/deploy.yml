@@ -55,10 +55,13 @@ jobs:
 
       - name: Deploy on Hetzner (SSH + kubectl)
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         with:
           host: ${{ secrets.HETZNER_HOST }}
           username: ${{ secrets.HETZNER_USER }}
           key: ${{ secrets.HETZNER_SSH_KEY }}
+          envs: OPENAI_API_KEY
           script_stop: true
           script: |
             set -euo pipefail
@@ -69,5 +72,9 @@ jobs:
             cd "${{ secrets.HETZNER_REPO_PATH }}"
             git fetch origin main
             git reset --hard origin/main
-            chmod +x kubernetes/harco/deploy.sh kubernetes/scripts/sync-jobscraper-db-secret.sh
+            chmod +x \
+              kubernetes/harco/deploy.sh \
+              kubernetes/scripts/sync-jobscraper-db-secret.sh \
+              kubernetes/scripts/sync-jobscraper-openai-secret.sh
+            ./kubernetes/scripts/sync-jobscraper-openai-secret.sh
             ./kubernetes/harco/deploy.sh "${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }}"

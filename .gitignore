@@ -13,6 +13,8 @@ venv/
 .DS_Store
 data/onet_raw/
 data/sample_jobs.csv
+data/skill_embeddings.bin
+data/skill_embeddings*.bin
 scripts/test_3_jobs.py
 scripts/eval_role_classifier.py
 scripts/verify_fixes.py
