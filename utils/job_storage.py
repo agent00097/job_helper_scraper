@@ -7,10 +7,25 @@ from datetime import datetime
 import db
 from models import JobData
 from utils.deduplication import is_duplicate_job, generate_content_hash
-from utils.geo import derive_country
+from utils.geo import parse_location
 from utils.role_classifier import classify_role
 
 logger = logging.getLogger(__name__)
+
+
+def _geo_fields(location: Optional[str]) -> dict:
+    """Parse free-text location into DB columns; never raises."""
+    try:
+        parts = parse_location(location) if location else parse_location(None)
+        return parts.as_dict()
+    except Exception:
+        return {
+            "country_code": None,
+            "admin1_code": None,
+            "admin1_name": None,
+            "locality": None,
+            "geo_precision": "unknown",
+        }
 
 
 def _extract_skills_safe(job_id, title: Optional[str], description: Optional[str]) -> None:
@@ -95,6 +110,8 @@ def save_job(
                     except Exception:
                         role_function = None
 
+                    geo = _geo_fields(job.location)
+
                     cur.execute(
                         """
                         UPDATE jobs
@@ -104,7 +121,12 @@ def save_job(
                             content_hash = %s,
                             occupation_category = COALESCE(occupation_category, %s),
                             role_function = COALESCE(role_function, %s),
-                            company_id = COALESCE(company_id, %s)
+                            company_id = COALESCE(company_id, %s),
+                            country_code = COALESCE(country_code, %s),
+                            admin1_code = COALESCE(admin1_code, %s),
+                            admin1_name = COALESCE(admin1_name, %s),
+                            locality = COALESCE(locality, %s),
+                            geo_precision = COALESCE(NULLIF(geo_precision, 'unknown'), %s)
                         WHERE id = %s
                         """,
                         (
@@ -115,6 +137,11 @@ def save_job(
                             job.occupation_category,
                             role_function,
                             str(company_id) if company_id else None,
+                            geo["country_code"],
+                            geo["admin1_code"],
+                            geo["admin1_name"],
+                            geo["locality"],
+                            geo["geo_precision"],
                             existing_id,
                         ),
                     )
@@ -148,11 +175,7 @@ def save_job(
                     return False
 
                 # New job - insert it
-                # Phase 2 wiring — pending DB validation (add_country_code_to_jobs.sql).
-                try:
-                    country_code = derive_country(job.location) if job.location else None
-                except Exception:
-                    country_code = None
+                geo = _geo_fields(job.location)
 
                 # Phase 3 wiring — pending DB validation (add_role_function_to_jobs.sql).
                 try:
@@ -170,11 +193,12 @@ def save_job(
                         sponsorship_required, citizenship_required, remote_allowed,
                         hybrid_allowed, source_website, job_id_from_source, status,
                         last_updated, scraped_at, created_at, content_hash,
-                        country_code, occupation_category, role_function, company_id
+                        country_code, admin1_code, admin1_name, locality, geo_precision,
+                        occupation_category, role_function, company_id
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s
                     )
                     RETURNING id
                     """,
@@ -202,7 +226,11 @@ def save_job(
                         job.scraped_at,
                         job.created_at,
                         content_hash,
-                        country_code,
+                        geo["country_code"],
+                        geo["admin1_code"],
+                        geo["admin1_name"],
+                        geo["locality"],
+                        geo["geo_precision"],
                         job.occupation_category,
                         role_function,
                         str(company_id) if company_id else None,

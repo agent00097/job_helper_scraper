@@ -1,11 +1,15 @@
 """
-Pure-function geographic inference from free-text location strings.
+Pure-function geographic inference from free-text location strings (US + CA).
 
 derive_country(location) -> "CA" | "US" | None
+parse_location(location) -> GeoParts (country, admin1, locality, precision)
 """
 from __future__ import annotations
 
 import re
+from dataclasses import asdict, dataclass
+from typing import Any, Optional
+
 
 # ---------------------------------------------------------------------------
 # Canadian provinces and territories — full name (lowercase) and abbreviation
@@ -26,6 +30,41 @@ _CA_PROVINCE_ABBREVS: frozenset[str] = frozenset({
     "NS", "NB", "NL", "PE", "NT", "YT", "NU",
 })
 
+_CA_NAME_TO_CODE: dict[str, str] = {
+    "ontario": "ON",
+    "quebec": "QC",
+    "québec": "QC",
+    "british columbia": "BC",
+    "alberta": "AB",
+    "manitoba": "MB",
+    "saskatchewan": "SK",
+    "nova scotia": "NS",
+    "new brunswick": "NB",
+    "newfoundland and labrador": "NL",
+    "newfoundland": "NL",
+    "labrador": "NL",
+    "prince edward island": "PE",
+    "northwest territories": "NT",
+    "yukon": "YT",
+    "nunavut": "NU",
+}
+
+_CA_CODE_TO_NAME: dict[str, str] = {
+    "ON": "Ontario",
+    "QC": "Quebec",
+    "BC": "British Columbia",
+    "AB": "Alberta",
+    "MB": "Manitoba",
+    "SK": "Saskatchewan",
+    "NS": "Nova Scotia",
+    "NB": "New Brunswick",
+    "NL": "Newfoundland and Labrador",
+    "PE": "Prince Edward Island",
+    "NT": "Northwest Territories",
+    "YT": "Yukon",
+    "NU": "Nunavut",
+}
+
 # ---------------------------------------------------------------------------
 # US states (all 50 + DC) — full name (lowercase) and abbreviation
 # ---------------------------------------------------------------------------
@@ -41,6 +80,7 @@ _US_STATE_NAMES: frozenset[str] = frozenset({
     "oregon", "pennsylvania", "rhode island", "south carolina",
     "south dakota", "tennessee", "texas", "utah", "vermont",
     "virginia", "washington", "west virginia", "wisconsin", "wyoming",
+    "district of columbia",
 })
 
 _US_STATE_ABBREVS: frozenset[str] = frozenset({
@@ -51,6 +91,30 @@ _US_STATE_ABBREVS: frozenset[str] = frozenset({
     "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
     "DC",
 })
+
+_US_NAME_TO_CODE: dict[str, str] = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+    "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ",
+    "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+    "north dakota": "ND", "ohio": "OH", "oklahoma": "OK", "oregon": "OR",
+    "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    "district of columbia": "DC",
+}
+
+_US_CODE_TO_NAME: dict[str, str] = {
+    code: name.title() if name != "district of columbia" else "District of Columbia"
+    for name, code in _US_NAME_TO_CODE.items()
+}
+_US_CODE_TO_NAME["DC"] = "District of Columbia"
 
 # ---------------------------------------------------------------------------
 # Unambiguous city names
@@ -88,12 +152,66 @@ _US_CITIES: frozenset[str] = frozenset({
     "washington dc", "washington, dc",
 })
 
-# ---------------------------------------------------------------------------
-# Pattern: one 2-letter uppercase token preceded by a separator (comma,
-# space, pipe, slash) and followed by end-of-string or another separator.
-# This avoids matching mid-word letter pairs like "BC" in "BATCH".
-# ---------------------------------------------------------------------------
+_CITY_COUNTRY: dict[str, str] = {c: "CA" for c in _CA_CITIES}
+_CITY_COUNTRY.update({c: "US" for c in _US_CITIES})
+
+# Cities that imply a default admin1 when bare.
+_CITY_ADMIN1: dict[str, tuple[str, str]] = {
+    "toronto": ("CA", "ON"),
+    "montreal": ("CA", "QC"),
+    "montréal": ("CA", "QC"),
+    "vancouver": ("CA", "BC"),
+    "calgary": ("CA", "AB"),
+    "edmonton": ("CA", "AB"),
+    "ottawa": ("CA", "ON"),
+    "winnipeg": ("CA", "MB"),
+    "new york": ("US", "NY"),
+    "new york city": ("US", "NY"),
+    "nyc": ("US", "NY"),
+    "los angeles": ("US", "CA"),
+    "san francisco": ("US", "CA"),
+    "san jose": ("US", "CA"),
+    "sacramento": ("US", "CA"),
+    "san diego": ("US", "CA"),
+    "seattle": ("US", "WA"),
+    "chicago": ("US", "IL"),
+    "boston": ("US", "MA"),
+    "austin": ("US", "TX"),
+    "dallas": ("US", "TX"),
+    "houston": ("US", "TX"),
+    "denver": ("US", "CO"),
+    "miami": ("US", "FL"),
+    "atlanta": ("US", "GA"),
+    "washington dc": ("US", "DC"),
+    "washington, dc": ("US", "DC"),
+    "bay area": ("US", "CA"),
+    "san francisco bay area": ("US", "CA"),
+    "silicon valley": ("US", "CA"),
+}
+
 _ABBREV_RE = re.compile(r"(?:^|[,\s|/])([A-Z]{2})(?=\s*(?:[,\s|/]|$))")
+_MULTI_LOC_RE = re.compile(r"^\d+\s+locations?$", re.IGNORECASE)
+_REMOTE_RE = re.compile(
+    r"\b(remote|work\s*from\s*home|wfh|anywhere|fully\s*remote)\b",
+    re.IGNORECASE,
+)
+_NOISE_RE = re.compile(
+    r"\b(hybrid|hq|headquarters|metro\s*area|greater|region|"
+    r"united\s*states|u\.s\.a\.|usa|canada|office)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class GeoParts:
+    country_code: Optional[str] = None
+    admin1_code: Optional[str] = None
+    admin1_name: Optional[str] = None
+    locality: Optional[str] = None
+    geo_precision: str = "unknown"
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def derive_country(location: str) -> str | None:
@@ -103,44 +221,283 @@ def derive_country(location: str) -> str | None:
 
     Errs conservative: ambiguous names like bare "London" or "Remote" → None.
     """
+    return parse_location(location).country_code
+
+
+def parse_location(location: Optional[str]) -> GeoParts:
+    """
+    Parse free-text ATS location into structured US/CA geography.
+
+    Examples:
+      "Sacramento, CA" -> locality=Sacramento, admin1=CA, country=US
+      "California"     -> admin1=CA, country=US, precision=admin1
+      "Toronto, ON"    -> locality=Toronto, admin1=ON, country=CA
+      "Remote - US"    -> country=US, precision=country
+    """
+    if not location or not str(location).strip():
+        return GeoParts()
+
+    raw = str(location).strip()
+    if _MULTI_LOC_RE.match(raw):
+        return GeoParts()
+
+    raw_lower = raw.lower()
+
+    # Remote / anywhere with optional country (check full string before splitting).
+    if _REMOTE_RE.search(raw_lower):
+        country = _country_keyword(raw_lower)
+        # If there is also a concrete place ("Remote - New York, NY"), keep parsing.
+        remainder = _REMOTE_RE.sub(" ", raw)
+        remainder = re.sub(r"[\-–—|/]+", " ", remainder)
+        remainder = re.sub(r"\s+", " ", remainder).strip(" ,")
+        if not remainder or not _looks_like_place(remainder):
+            if country:
+                return GeoParts(country_code=country, geo_precision="country")
+            return GeoParts()
+        primary = remainder
+    else:
+        # Multi-office strings: take the first segment.
+        primary = re.split(r"[;|/]| - | – | — ", raw, maxsplit=1)[0].strip()
+        if not primary:
+            primary = raw
+
+    loc_lower = primary.lower()
+
+    # Bare country.
+    if re.fullmatch(r"(united states|u\.s\.a\.|usa|us|canada)", loc_lower):
+        country = "CA" if "canada" in loc_lower else "US"
+        return GeoParts(country_code=country, geo_precision="country")
+
+    # Bare state / province full name.
+    for name, code in _US_NAME_TO_CODE.items():
+        if re.fullmatch(re.escape(name), loc_lower):
+            return GeoParts(
+                country_code="US",
+                admin1_code=code,
+                admin1_name=_US_CODE_TO_NAME.get(code),
+                geo_precision="admin1",
+            )
+    for name, code in _CA_NAME_TO_CODE.items():
+        if re.fullmatch(re.escape(name), loc_lower):
+            return GeoParts(
+                country_code="CA",
+                admin1_code=code,
+                admin1_name=_CA_CODE_TO_NAME.get(code),
+                geo_precision="admin1",
+            )
+
+    # Bare 2-letter admin1.
+    if re.fullmatch(r"[A-Za-z]{2}", primary):
+        code = primary.upper()
+        if code in _US_STATE_ABBREVS:
+            return GeoParts(
+                country_code="US",
+                admin1_code=code,
+                admin1_name=_US_CODE_TO_NAME.get(code),
+                geo_precision="admin1",
+            )
+        if code in _CA_PROVINCE_ABBREVS:
+            return GeoParts(
+                country_code="CA",
+                admin1_code=code,
+                admin1_name=_CA_CODE_TO_NAME.get(code),
+                geo_precision="admin1",
+            )
+
+    # "City, ST" / "City, State" / "City, ST, Country"
+    parts = [p.strip() for p in primary.split(",") if p.strip()]
+    if len(parts) >= 2:
+        locality = _clean_locality(parts[0])
+        admin_raw = parts[1]
+        admin_code, country, admin_name = _resolve_admin(admin_raw)
+        if not country and len(parts) >= 3:
+            country = _country_keyword(parts[2].lower()) or derive_country_fast(parts[2])
+        if admin_code:
+            if not country:
+                country = "US" if admin_code in _US_STATE_ABBREVS else "CA"
+            precision = "locality" if locality else "admin1"
+            return GeoParts(
+                country_code=country,
+                admin1_code=admin_code,
+                admin1_name=admin_name,
+                locality=locality or None,
+                geo_precision=precision,
+            )
+        # Second token wasn't admin1 — maybe "City, Country"
+        country = _country_keyword(admin_raw.lower()) or derive_country_fast(admin_raw)
+        if locality and country:
+            hint = _CITY_ADMIN1.get(locality.lower())
+            if hint and hint[0] == country:
+                return GeoParts(
+                    country_code=country,
+                    admin1_code=hint[1],
+                    admin1_name=_admin_name(hint[0], hint[1]),
+                    locality=locality,
+                    geo_precision="locality",
+                )
+            return GeoParts(
+                country_code=country,
+                locality=locality,
+                geo_precision="locality",
+            )
+
+    # Single token / phrase: known city or contains city+state.
+    cleaned = _NOISE_RE.sub(" ", primary)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+    cleaned_lower = cleaned.lower()
+
+    # Abbrev in string without comma (e.g. "Sacramento CA")
+    abbrevs = _ABBREV_RE.findall(cleaned)
+    for abbrev in abbrevs:
+        if abbrev in _CA_PROVINCE_ABBREVS or abbrev in _US_STATE_ABBREVS:
+            country = "CA" if abbrev in _CA_PROVINCE_ABBREVS else "US"
+            locality = _clean_locality(
+                re.sub(rf"(?:^|[,\s|/]){abbrev}(?=\s*(?:[,\s|/]|$))", " ", cleaned)
+            )
+            return GeoParts(
+                country_code=country,
+                admin1_code=abbrev,
+                admin1_name=_admin_name(country, abbrev),
+                locality=locality or None,
+                geo_precision="locality" if locality else "admin1",
+            )
+
+    # Known city names (longest first).
+    for city in sorted(_CITY_COUNTRY.keys(), key=len, reverse=True):
+        if re.search(r"\b" + re.escape(city) + r"\b", cleaned_lower):
+            country = _CITY_COUNTRY[city]
+            hint = _CITY_ADMIN1.get(city)
+            admin1 = hint[1] if hint else None
+            display_city = city.title() if city not in {"nyc", "bay area"} else {
+                "nyc": "New York",
+                "bay area": "Bay Area",
+                "san francisco bay area": "San Francisco Bay Area",
+                "silicon valley": "Silicon Valley",
+                "washington dc": "Washington",
+                "washington, dc": "Washington",
+            }.get(city, city.title())
+            return GeoParts(
+                country_code=country,
+                admin1_code=admin1,
+                admin1_name=_admin_name(country, admin1) if admin1 else None,
+                locality=display_city,
+                geo_precision="locality",
+            )
+
+    # Full state/province name embedded.
+    for name, code in sorted(_US_NAME_TO_CODE.items(), key=lambda x: -len(x[0])):
+        if re.search(r"\b" + re.escape(name) + r"\b", cleaned_lower):
+            return GeoParts(
+                country_code="US",
+                admin1_code=code,
+                admin1_name=_US_CODE_TO_NAME.get(code),
+                geo_precision="admin1",
+            )
+    for name, code in sorted(_CA_NAME_TO_CODE.items(), key=lambda x: -len(x[0])):
+        if re.search(r"\b" + re.escape(name) + r"\b", cleaned_lower):
+            return GeoParts(
+                country_code="CA",
+                admin1_code=code,
+                admin1_name=_CA_CODE_TO_NAME.get(code),
+                geo_precision="admin1",
+            )
+
+    country = _country_keyword(cleaned_lower) or derive_country_fast(cleaned)
+    if country:
+        return GeoParts(country_code=country, geo_precision="country")
+    return GeoParts()
+
+
+def derive_country_fast(location: str) -> Optional[str]:
+    """Lightweight country-only scan (used as helper inside parse_location)."""
     if not location or not location.strip():
         return None
-
     loc = location.strip()
     loc_lower = loc.lower()
-
-    # 1. Country-level keywords (strongest signal, checked first).
     if re.search(r"\bcanada\b", loc_lower):
         return "CA"
     if re.search(r"\b(united states|u\.s\.a\.)\b", loc_lower):
         return "US"
     if re.search(r"\busa\b", loc_lower):
         return "US"
-
-    # 2. Province / state abbreviations in context.
-    #    Check Canadian provinces before US states so a CA province abbrev
-    #    is never shadowed by a US state of the same letters (there is no
-    #    overlap between the two sets, but ordering makes intent clear).
     for abbrev in _ABBREV_RE.findall(loc):
         if abbrev in _CA_PROVINCE_ABBREVS:
             return "CA"
         if abbrev in _US_STATE_ABBREVS:
             return "US"
-
-    # 3. Province / state full names.
     for name in _CA_PROVINCE_NAMES:
         if re.search(r"\b" + re.escape(name) + r"\b", loc_lower):
             return "CA"
     for name in _US_STATE_NAMES:
         if re.search(r"\b" + re.escape(name) + r"\b", loc_lower):
             return "US"
-
-    # 4. Unambiguous city names (lower-confidence than state signals).
     for city in _CA_CITIES:
         if re.search(r"\b" + re.escape(city) + r"\b", loc_lower):
             return "CA"
     for city in _US_CITIES:
         if re.search(r"\b" + re.escape(city) + r"\b", loc_lower):
             return "US"
+    return None
 
+
+def _country_keyword(loc_lower: str) -> Optional[str]:
+    if re.search(r"\bcanada\b", loc_lower):
+        return "CA"
+    if re.search(r"\b(united states|u\.s\.a\.|usa|\bus\b)\b", loc_lower):
+        return "US"
+    return None
+
+
+def _looks_like_place(text: str) -> bool:
+    """True if text has more than just remote keywords (e.g. 'Remote - New York, NY')."""
+    stripped = _REMOTE_RE.sub(" ", text)
+    stripped = _NOISE_RE.sub(" ", stripped)
+    stripped = re.sub(r"[^A-Za-z]", " ", stripped)
+    return bool(stripped.strip())
+
+
+def _clean_locality(text: str) -> str:
+    cleaned = _REMOTE_RE.sub(" ", text)
+    cleaned = _NOISE_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+    return cleaned
+
+
+def _resolve_admin(token: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    t = token.strip()
+    t_lower = t.lower()
+    # Strip trailing country words: "CA USA", "ON Canada"
+    t_lower = re.sub(r"\b(united states|u\.s\.a\.|usa|us|canada)\b", "", t_lower).strip()
+    t_compact = re.sub(r"[^A-Za-z ]", "", t_lower).strip()
+
+    if re.fullmatch(r"[A-Za-z]{2}", t_compact):
+        code = t_compact.upper()
+        if code in _US_STATE_ABBREVS:
+            return code, "US", _US_CODE_TO_NAME.get(code)
+        if code in _CA_PROVINCE_ABBREVS:
+            return code, "CA", _CA_CODE_TO_NAME.get(code)
+
+    if t_compact in _US_NAME_TO_CODE:
+        code = _US_NAME_TO_CODE[t_compact]
+        return code, "US", _US_CODE_TO_NAME.get(code)
+    if t_compact in _CA_NAME_TO_CODE:
+        code = _CA_NAME_TO_CODE[t_compact]
+        return code, "CA", _CA_CODE_TO_NAME.get(code)
+
+    # Abbrev embedded in token
+    for abbrev in _ABBREV_RE.findall(t):
+        if abbrev in _US_STATE_ABBREVS:
+            return abbrev, "US", _US_CODE_TO_NAME.get(abbrev)
+        if abbrev in _CA_PROVINCE_ABBREVS:
+            return abbrev, "CA", _CA_CODE_TO_NAME.get(abbrev)
+    return None, None, None
+
+
+def _admin_name(country: str, code: Optional[str]) -> Optional[str]:
+    if not code:
+        return None
+    if country == "US":
+        return _US_CODE_TO_NAME.get(code)
+    if country == "CA":
+        return _CA_CODE_TO_NAME.get(code)
     return None

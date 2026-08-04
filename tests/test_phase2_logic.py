@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.geo import derive_country
+from utils.geo import derive_country, parse_location
 from utils.company_discovery import parse_company_from_url
 from sources.api.workday_source import WorkdaySource
 
@@ -178,6 +178,47 @@ check(
     _source._resolve_location(None, None),
     None,
 )
+
+# ---------------------------------------------------------------------------
+# 4. parse_location
+# ---------------------------------------------------------------------------
+
+print("\n── 4. parse_location ──────────────────────────────────────────────")
+
+PARSE_CASES = [
+    ("Sacramento, CA", ("US", "CA", "Sacramento", "locality")),
+    ("California", ("US", "CA", None, "admin1")),
+    ("Toronto, ON", ("CA", "ON", "Toronto", "locality")),
+    ("New York, NY", ("US", "NY", "New York", "locality")),
+    ("Remote", (None, None, None, "unknown")),
+    ("Remote - United States", ("US", None, None, "country")),
+    ("Austin, Texas", ("US", "TX", "Austin", "locality")),
+    ("British Columbia", ("CA", "BC", None, "admin1")),
+    ("San Francisco Bay Area", ("US", "CA", "San Francisco Bay Area", "locality")),
+]
+
+for location, (country, admin1, locality, precision) in PARSE_CASES:
+    got = parse_location(location)
+    check(
+        f"parse_location({location!r}).country",
+        got.country_code,
+        country,
+    )
+    check(
+        f"parse_location({location!r}).admin1",
+        got.admin1_code,
+        admin1,
+    )
+    check(
+        f"parse_location({location!r}).locality",
+        got.locality,
+        locality,
+    )
+    check(
+        f"parse_location({location!r}).precision",
+        got.geo_precision,
+        precision,
+    )
 
 # ---------------------------------------------------------------------------
 # Summary
