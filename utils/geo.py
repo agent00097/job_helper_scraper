@@ -189,6 +189,58 @@ _CITY_ADMIN1: dict[str, tuple[str, str]] = {
     "silicon valley": ("US", "CA"),
 }
 
+# ---------------------------------------------------------------------------
+# Countries outside the US/CA market.
+#
+# Only consulted after every US/CA rule has failed, so names that collide with
+# North American places ("Georgia", "Lebanon, PA") resolve to US/CA first.
+# Two-letter aliases are limited to codes that are not US state or Canadian
+# province abbreviations (e.g. no "IN" for India — that is Indiana).
+# ---------------------------------------------------------------------------
+
+_FOREIGN_COUNTRIES: dict[str, str] = {
+    # Europe
+    "united kingdom": "GB", "uk": "GB", "u.k.": "GB", "great britain": "GB",
+    "england": "GB", "scotland": "GB", "wales": "GB", "northern ireland": "GB",
+    "ireland": "IE", "france": "FR", "germany": "DE", "deutschland": "DE",
+    "spain": "ES", "portugal": "PT", "italy": "IT", "netherlands": "NL",
+    "belgium": "BE", "luxembourg": "LU", "switzerland": "CH", "austria": "AT",
+    "sweden": "SE", "norway": "NO", "denmark": "DK", "finland": "FI",
+    "iceland": "IS", "poland": "PL", "czechia": "CZ", "czech republic": "CZ",
+    "slovakia": "SK", "hungary": "HU", "romania": "RO", "bulgaria": "BG",
+    "greece": "GR", "croatia": "HR", "serbia": "RS", "slovenia": "SI",
+    "estonia": "EE", "latvia": "LV", "lithuania": "LT", "ukraine": "UA",
+    "russia": "RU", "belarus": "BY", "cyprus": "CY", "malta": "MT",
+    # Asia-Pacific
+    "china": "CN", "hong kong": "HK", "taiwan": "TW", "japan": "JP",
+    "south korea": "KR", "korea": "KR", "singapore": "SG", "malaysia": "MY",
+    "indonesia": "ID", "thailand": "TH", "vietnam": "VN", "viet nam": "VN",
+    "philippines": "PH", "india": "IN", "pakistan": "PK", "bangladesh": "BD",
+    "sri lanka": "LK", "nepal": "NP", "australia": "AU", "new zealand": "NZ",
+    # Middle East / Africa
+    "israel": "IL", "turkey": "TR", "türkiye": "TR",
+    "united arab emirates": "AE", "uae": "AE", "saudi arabia": "SA",
+    "qatar": "QA", "kuwait": "KW", "bahrain": "BH", "oman": "OM",
+    "jordan": "JO", "lebanon": "LB", "egypt": "EG", "morocco": "MA",
+    "tunisia": "TN", "nigeria": "NG", "ghana": "GH", "kenya": "KE",
+    "south africa": "ZA", "ethiopia": "ET",
+    # Americas (excluding US/CA)
+    "mexico": "MX", "brazil": "BR", "brasil": "BR", "argentina": "AR",
+    "chile": "CL", "colombia": "CO", "peru": "PE", "uruguay": "UY",
+    "paraguay": "PY", "bolivia": "BO", "ecuador": "EC", "venezuela": "VE",
+    "costa rica": "CR", "panama": "PA", "guatemala": "GT", "honduras": "HN",
+    "el salvador": "SV", "nicaragua": "NI", "dominican republic": "DO",
+    "jamaica": "JM", "puerto rico": "PR",
+}
+
+_FOREIGN_COUNTRY_RE = re.compile(
+    r"\b(" + "|".join(
+        re.escape(name)
+        for name in sorted(_FOREIGN_COUNTRIES, key=len, reverse=True)
+    ) + r")\b",
+    re.IGNORECASE,
+)
+
 _ABBREV_RE = re.compile(r"(?:^|[,\s|/])([A-Z]{2})(?=\s*(?:[,\s|/]|$))")
 _MULTI_LOC_RE = re.compile(r"^\d+\s+locations?$", re.IGNORECASE)
 _REMOTE_RE = re.compile(
@@ -216,23 +268,29 @@ class GeoParts:
 
 def derive_country(location: str) -> str | None:
     """
-    Infer "CA" (Canada) or "US" (United States) from a free-text location
-    string, or return None if the country cannot be determined confidently.
+    Infer an ISO country code from a free-text location string, or return None
+    if the country cannot be determined confidently.
 
-    Errs conservative: ambiguous names like bare "London" or "Remote" → None.
+    US/CA signals win over any other country, so "Georgia" is the state and
+    "Lebanon, PA" is Pennsylvania. Errs conservative: ambiguous names like bare
+    "London" or "Remote" → None.
     """
     return parse_location(location).country_code
 
 
 def parse_location(location: Optional[str]) -> GeoParts:
     """
-    Parse free-text ATS location into structured US/CA geography.
+    Parse free-text ATS location into structured geography.
+
+    admin1/locality are only resolved for the US/CA market; other countries get
+    a country code so they can be filtered out of US/CA matching.
 
     Examples:
       "Sacramento, CA" -> locality=Sacramento, admin1=CA, country=US
       "California"     -> admin1=CA, country=US, precision=admin1
       "Toronto, ON"    -> locality=Toronto, admin1=ON, country=CA
       "Remote - US"    -> country=US, precision=country
+      "China (Remote)" -> country=CN, precision=country
     """
     if not location or not str(location).strip():
         return GeoParts()
@@ -324,7 +382,11 @@ def parse_location(location: Optional[str]) -> GeoParts:
                 geo_precision=precision,
             )
         # Second token wasn't admin1 — maybe "City, Country"
-        country = _country_keyword(admin_raw.lower()) or derive_country_fast(admin_raw)
+        country = (
+            _country_keyword(admin_raw.lower())
+            or derive_country_fast(admin_raw)
+            or _foreign_country(admin_raw)
+        )
         if locality and country:
             hint = _CITY_ADMIN1.get(locality.lower())
             if hint and hint[0] == country:
@@ -402,7 +464,11 @@ def parse_location(location: Optional[str]) -> GeoParts:
                 geo_precision="admin1",
             )
 
-    country = _country_keyword(cleaned_lower) or derive_country_fast(cleaned)
+    country = (
+        _country_keyword(cleaned_lower)
+        or derive_country_fast(cleaned)
+        or _foreign_country(cleaned)
+    )
     if country:
         return GeoParts(country_code=country, geo_precision="country")
     return GeoParts()
@@ -438,6 +504,14 @@ def derive_country_fast(location: str) -> Optional[str]:
         if re.search(r"\b" + re.escape(city) + r"\b", loc_lower):
             return "US"
     return None
+
+
+def _foreign_country(text: str) -> Optional[str]:
+    """ISO code for a non-US/CA country named in `text`, else None."""
+    if not text or not text.strip():
+        return None
+    match = _FOREIGN_COUNTRY_RE.search(text)
+    return _FOREIGN_COUNTRIES[match.group(1).lower()] if match else None
 
 
 def _country_keyword(loc_lower: str) -> Optional[str]:

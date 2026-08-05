@@ -56,6 +56,12 @@ COUNTRY_CASES = [
     ("Montreal, QC",      "CA"),
     ("6 Locations",       None),
     ("Europe",            None),
+    ("China (Remote)",    "CN"),
+    ("Remote - India",    "IN"),
+    ("London, UK",        "GB"),
+    ("Bengaluru, India",  "IN"),
+    ("Georgia",           "US"),   # US state wins over the country
+    ("Lebanon, PA",       "US"),   # US city wins over the country
 ]
 
 for location, expected in COUNTRY_CASES:
@@ -195,6 +201,9 @@ PARSE_CASES = [
     ("Austin, Texas", ("US", "TX", "Austin", "locality")),
     ("British Columbia", ("CA", "BC", None, "admin1")),
     ("San Francisco Bay Area", ("US", "CA", "San Francisco Bay Area", "locality")),
+    ("China (Remote)", ("CN", None, None, "country")),
+    ("Shanghai, China", ("CN", None, "Shanghai", "locality")),
+    ("Remote - United Kingdom", ("GB", None, None, "country")),
 ]
 
 for location, (country, admin1, locality, precision) in PARSE_CASES:
