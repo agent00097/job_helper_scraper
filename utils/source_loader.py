@@ -62,7 +62,8 @@ def get_source_companies(source_name: str) -> List[Dict]:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, company_name, normalized_name,
-                       source_endpoints->>%s AS company_endpoint
+                       source_endpoints->>%s AS company_endpoint,
+                       logo_url, domain
                 FROM source_companies
                 WHERE jsonb_exists(source_endpoints, %s)
                   AND enabled = TRUE
@@ -75,6 +76,8 @@ def get_source_companies(source_name: str) -> List[Dict]:
                     "company_name": row[1],
                     "normalized_name": row[2],
                     "company_endpoint": row[3],
+                    "logo_url": row[4],
+                    "domain": row[5],
                 })
 
             return companies

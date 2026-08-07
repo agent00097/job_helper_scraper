@@ -19,6 +19,7 @@ from uuid import UUID
 import db
 import pika
 from models import JobData
+from services.ats_logo_hint import resolve_ats_logo_hint
 from utils.company_normalization import normalize_company_name
 from utils.domain_resolver import is_junk_slug, resolve_domain
 from workers.rabbitmq_settings import load_rabbitmq_worker_settings
@@ -57,10 +58,15 @@ def ensure_company(
         return company_id
 
     # --- Not found: publish onboarding event ---
-    domain_hint = None
+    domain_hint = getattr(job_data, "company_domain_hint", None) or None
     try:
         handle = _company_handle(source_name, source_endpoint)
-        if is_junk_slug(handle, job_data.company or ""):
+        if domain_hint:
+            logger.debug(
+                "ensure_company: using source-provided domain hint %r",
+                domain_hint,
+            )
+        elif is_junk_slug(handle, job_data.company or ""):
             logger.debug(
                 "ensure_company: skipping domain resolution for junk slug %r",
                 handle,
@@ -73,12 +79,24 @@ def ensure_company(
         )
         domain_hint = None
 
+    # Capture the ATS-hosted logo URL while the board is being scraped. The
+    # onboarding worker only uses this after domain-based methods fail.
+    logo_hint_url = None
+    try:
+        logo_hint_url = resolve_ats_logo_hint(source_name, source_endpoint)
+    except Exception:
+        logger.warning(
+            "ensure_company: ATS logo hint resolution raised unexpectedly for %r",
+            source_endpoint,
+        )
+
     payload = {
         "company_name": job_data.company,
         "normalized_name": normalized,
         "source_name": source_name,
         "source_endpoint": source_endpoint,
         "domain_hint": domain_hint,
+        "logo_hint_url": logo_hint_url,
     }
     try:
         _publish_onboarding(payload)
@@ -93,6 +111,66 @@ def ensure_company(
         )
 
     return None
+
+
+def queue_existing_company_enrichment(
+    *,
+    company_name: str,
+    normalized_name: str,
+    source_name: str,
+    source_endpoint: str,
+    stored_domain: Optional[str] = None,
+    source_domain_hint: Optional[str] = None,
+) -> bool:
+    """Queue enrichment for an existing source_companies row.
+
+    Scheduled scrapes start from existing company rows, so this is the normal
+    path for filling a missing logo. Returns whether publishing succeeded.
+    """
+    domain_hint = stored_domain or source_domain_hint
+    if not domain_hint:
+        try:
+            handle = _company_handle(source_name, source_endpoint)
+            if not is_junk_slug(handle, company_name):
+                domain_hint = resolve_domain(company_name, handle)
+        except Exception:
+            logger.warning(
+                "Company enrichment domain resolution failed for %r",
+                source_endpoint,
+            )
+
+    logo_hint_url = None
+    try:
+        logo_hint_url = resolve_ats_logo_hint(source_name, source_endpoint)
+    except Exception:
+        logger.warning(
+            "Company enrichment ATS logo resolution failed for %r",
+            source_endpoint,
+        )
+
+    payload = {
+        "company_name": company_name,
+        "normalized_name": normalized_name,
+        "source_name": source_name,
+        "source_endpoint": source_endpoint,
+        "domain_hint": domain_hint,
+        "logo_hint_url": logo_hint_url,
+    }
+    try:
+        _publish_onboarding(payload)
+        logger.info(
+            "Queued enrichment for existing company %r via %s/%s",
+            normalized_name,
+            source_name,
+            source_endpoint,
+        )
+        return True
+    except Exception:
+        logger.warning(
+            "Company enrichment publish failed for %r",
+            normalized_name,
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------

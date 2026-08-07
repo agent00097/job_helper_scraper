@@ -8,24 +8,17 @@ tested without a live database or message broker.
 from __future__ import annotations
 
 import sys
-import types
 from unittest.mock import MagicMock
 
 # Patch heavy deps before importing company_check.
-# 'models' is mocked as a plain module so pydantic is never imported.
-_models_mock = types.ModuleType("models")
-_models_mock.JobData = MagicMock()  # type: ignore[attr-defined]
-
 for _dep, _mock in (
     ("db", MagicMock()),
     ("pika", MagicMock()),
-    ("workers", MagicMock()),
-    ("workers.rabbitmq_settings", MagicMock()),
-    ("models", _models_mock),
 ):
     if _dep not in sys.modules:
         sys.modules[_dep] = _mock
 
+from services import company_check  # noqa: E402
 from services.company_check import _company_handle  # noqa: E402
 
 
@@ -59,3 +52,75 @@ class TestCompanyHandle:
         # Only Workday triggers the URL parse; other sources pass through as-is
         val = "https://boards.greenhouse.io/acme"
         assert _company_handle("greenhouse", val) == val
+
+
+def test_ensure_company_publishes_scraped_logo_hint(monkeypatch):
+    monkeypatch.setattr(company_check, "_lookup_company", lambda _: None)
+    monkeypatch.setattr(company_check, "resolve_domain", lambda *_: "acme.com")
+    monkeypatch.setattr(
+        company_check,
+        "resolve_ats_logo_hint",
+        lambda *_: "https://cdn.example.com/acme-logo.png",
+    )
+    published = []
+    monkeypatch.setattr(company_check, "_publish_onboarding", published.append)
+
+    job = MagicMock()
+    job.company = "Acme"
+    job.company_domain_hint = None
+
+    assert company_check.ensure_company(job, "ashby", "acme") is None
+    assert published[0]["domain_hint"] == "acme.com"
+    assert (
+        published[0]["logo_hint_url"]
+        == "https://cdn.example.com/acme-logo.png"
+    )
+
+
+def test_ensure_company_prefers_source_domain_hint(monkeypatch):
+    monkeypatch.setattr(company_check, "_lookup_company", lambda _: None)
+    guessed_domain = MagicMock(return_value="wrong.example")
+    monkeypatch.setattr(company_check, "resolve_domain", guessed_domain)
+    monkeypatch.setattr(company_check, "resolve_ats_logo_hint", lambda *_: None)
+    published = []
+    monkeypatch.setattr(company_check, "_publish_onboarding", published.append)
+
+    job = MagicMock()
+    job.company = "Acme"
+    job.company_domain_hint = "acme.example"
+
+    company_check.ensure_company(job, "greenhouse", "acme")
+
+    assert published[0]["domain_hint"] == "acme.example"
+    guessed_domain.assert_not_called()
+
+
+def test_queue_existing_company_enrichment_publishes_without_lookup(monkeypatch):
+    monkeypatch.setattr(
+        company_check,
+        "resolve_ats_logo_hint",
+        lambda *_: "https://cdn.example.com/acme.png",
+    )
+    published = []
+    monkeypatch.setattr(company_check, "_publish_onboarding", published.append)
+
+    success = company_check.queue_existing_company_enrichment(
+        company_name="Acme",
+        normalized_name="acme",
+        source_name="greenhouse",
+        source_endpoint="acme",
+        stored_domain="acme.com",
+        source_domain_hint="careers.acme.com",
+    )
+
+    assert success is True
+    assert published == [
+        {
+            "company_name": "Acme",
+            "normalized_name": "acme",
+            "source_name": "greenhouse",
+            "source_endpoint": "acme",
+            "domain_hint": "acme.com",
+            "logo_hint_url": "https://cdn.example.com/acme.png",
+        }
+    ]

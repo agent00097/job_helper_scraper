@@ -35,3 +35,6 @@ class JobData(BaseModel):
     country_code: Optional[str] = None
     occupation_category: Optional[str] = None
     company_id: Optional[UUID] = None
+    # Transient enrichment hints used by company onboarding. These are not
+    # persisted on the jobs table.
+    company_domain_hint: Optional[str] = None

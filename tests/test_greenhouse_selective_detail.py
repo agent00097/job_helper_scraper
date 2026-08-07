@@ -1,7 +1,7 @@
 """Unit tests for selective Greenhouse per-job detail fetching."""
 from unittest.mock import MagicMock, patch
 
-from sources.api.greenhouse_source import GreenhouseSource
+from sources.api.greenhouse_source import GreenhouseSource, _company_domain_hint
 from utils.deduplication import urls_with_existing_description
 
 
@@ -27,6 +27,37 @@ def _list_payload(*job_ids: int) -> dict:
             for jid in job_ids
         ]
     }
+
+
+def test_company_domain_hint_uses_greenhouse_absolute_url():
+    assert (
+        _company_domain_hint(
+            "https://careers.airbnb.com/positions/123?gh_jid=123"
+        )
+        == "airbnb.com"
+    )
+    assert (
+        _company_domain_hint("https://boards.greenhouse.io/acme/jobs/123")
+        is None
+    )
+
+
+def test_parse_job_carries_greenhouse_company_signals():
+    source = _source()
+    job = source._parse_job(
+        {
+            "id": 123,
+            "title": "Engineer",
+            "company_name": "Acme API Name",
+            "absolute_url": "https://jobs.acme.example/openings/123",
+            "metadata": [],
+        },
+        "Configured Name",
+        "acme",
+    )
+
+    assert job.company == "Acme API Name"
+    assert job.company_domain_hint == "acme.example"
 
 
 def test_urls_with_existing_description_queries_nonempty_only():

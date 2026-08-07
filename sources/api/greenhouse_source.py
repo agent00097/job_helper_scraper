@@ -7,6 +7,7 @@ import logging
 import html
 from typing import List, Dict, Optional
 from datetime import datetime, date
+from urllib.parse import urlparse
 
 from sources.base_source import BaseSource
 from models import JobData
@@ -54,6 +55,20 @@ def greenhouse_board_job_url(public_boards_url: str, company_endpoint: str, job_
     """Public board job page URL (e.g. https://boards.greenhouse.io/{board}/jobs/{id})."""
     root = public_boards_url.rstrip("/")
     return f"{root}/{company_endpoint}/jobs/{job_id}"
+
+
+def _company_domain_hint(absolute_url: object) -> Optional[str]:
+    """Extract a company-owned host from Greenhouse's absolute_url field."""
+    if not isinstance(absolute_url, str) or not absolute_url.strip():
+        return None
+    host = (urlparse(absolute_url.strip()).hostname or "").lower()
+    if not host or host.endswith("greenhouse.io"):
+        return None
+    host = host.removeprefix("www.")
+    labels = host.split(".")
+    if len(labels) >= 3 and labels[0] in {"career", "careers", "job", "jobs"}:
+        host = ".".join(labels[1:])
+    return host or None
 
 
 class GreenhouseSource(BaseSource):
@@ -220,10 +235,16 @@ class GreenhouseSource(BaseSource):
         application_url = job_url
         
         title = job_data.get("title")
+        api_company_name = job_data.get("company_name")
+        resolved_company_name = (
+            api_company_name.strip()
+            if isinstance(api_company_name, str) and api_company_name.strip()
+            else company_name
+        )
         job = JobData(
             url=job_url,
             job_title=title,
-            company=company_name,
+            company=resolved_company_name,
             location=location,
             job_description=None,  # fetched separately in fetch_jobs()
             date_posted=date_posted,
@@ -237,6 +258,7 @@ class GreenhouseSource(BaseSource):
             scraped_at=datetime.now(),
             created_at=datetime.now(),
             occupation_category=from_title(title or ""),
+            company_domain_hint=_company_domain_hint(job_data.get("absolute_url")),
         )
 
         return job
@@ -287,6 +309,9 @@ class GreenhouseSource(BaseSource):
 
     def _infer_company_name(self, job_detail: Dict, company_endpoint: str) -> str:
         """Best-effort company display name from API detail or board slug."""
+        company_name = job_detail.get("company_name")
+        if isinstance(company_name, str) and company_name.strip():
+            return company_name.strip()
         company = job_detail.get("company")
         if isinstance(company, dict) and company.get("name"):
             return str(company["name"])

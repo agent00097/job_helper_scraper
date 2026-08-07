@@ -2,6 +2,8 @@
 Worker for running a job source and fetching jobs.
 """
 import logging
+from uuid import UUID
+
 from sources.base_source import BaseSource
 from utils.source_loader import get_source_companies, update_source_last_run, update_company_last_fetched
 from utils.job_storage import save_jobs
@@ -12,6 +14,13 @@ from utils.job_archive import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def queue_existing_company_enrichment(**kwargs):
+    """Lazy import keeps RabbitMQ dependencies out of worker module import."""
+    from services.company_check import queue_existing_company_enrichment as queue
+
+    return queue(**kwargs)
 
 
 class SourceWorker:
@@ -73,6 +82,32 @@ class SourceWorker:
                 jobs = self.source.fetch_jobs(company_endpoint, company_name)
                 total_jobs_fetched += len(jobs)
 
+                # This worker loaded the company from source_companies, so stamp
+                # its known ID directly instead of re-discovering it per job.
+                for job in jobs:
+                    job.company_id = UUID(str(company_id))
+
+                # Existing companies bypass ensure_company(). Queue onboarding
+                # here when their logo is missing, using any source API domain
+                # signal plus a logo URL captured from the ATS board.
+                if not (company.get("logo_url") or "").strip():
+                    source_domain_hint = next(
+                        (
+                            job.company_domain_hint
+                            for job in jobs
+                            if job.company_domain_hint
+                        ),
+                        None,
+                    )
+                    queue_existing_company_enrichment(
+                        company_name=company_name,
+                        normalized_name=company["normalized_name"],
+                        source_name=self.source.name,
+                        source_endpoint=company_endpoint,
+                        stored_domain=company.get("domain"),
+                        source_domain_hint=source_domain_hint,
+                    )
+
                 if reconcile:
                     seen_ids, seen_urls = seen_keys_from_jobs(jobs)
                     archived = archive_jobs_missing_from_fetch(
@@ -84,8 +119,8 @@ class SourceWorker:
                     total_jobs_archived += archived
 
                 if jobs:
-                    # Save jobs to database; pass source_endpoint so ensure_company
-                    # can resolve / queue company onboarding for each job.
+                    # source_endpoint remains useful for non-scheduler callers;
+                    # these jobs already carry company_id.
                     saved, duplicates = save_jobs(jobs, source_endpoint=company_endpoint)
                     total_jobs_saved += saved
                     total_jobs_duplicates += duplicates
