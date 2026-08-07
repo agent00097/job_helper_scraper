@@ -10,6 +10,7 @@ from datetime import datetime, date
 
 from sources.base_source import BaseSource
 from models import JobData
+from utils.deduplication import urls_with_existing_description
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
@@ -76,6 +77,10 @@ class GreenhouseSource(BaseSource):
     def fetch_jobs(self, company_endpoint: str, company_name: str) -> List[JobData]:
         """
         Fetch jobs from Greenhouse for a specific company.
+
+        Always pulls the full board list (needed for new/closed detection).
+        Detail-fetches descriptions only for jobs that are new or already stored
+        without a description — skips per-job API calls when we already have one.
         
         Args:
             company_endpoint: Company slug (e.g., 'airbnb')
@@ -94,35 +99,43 @@ class GreenhouseSource(BaseSource):
             response.raise_for_status()
             
             jobs_data = response.json()
-            jobs = []
+            jobs: List[JobData] = []
             
             for job_data in jobs_data.get("jobs", []):
                 try:
-                    # Parse basic job info first
                     job = self._parse_job(job_data, company_name, company_endpoint)
                     if job:
-                        # Fetch full job description from detail endpoint
-                        job_id = job_data.get("id")
-                        job_description = self._fetch_job_description(
-                            company_endpoint, 
-                            job_id
-                        )
-                        if job_description:
-                            job.job_description = job_description
-                            logger.debug(f"Fetched description for job {job_id} ({len(job_description)} chars)")
-                        else:
-                            logger.debug(f"No description found for job {job_id}")
-                        
                         jobs.append(job)
                 except Exception as e:
                     logger.warning(f"Error parsing job from {company_name}: {e}")
                     continue
+
+            already_described = urls_with_existing_description(str(j.url) for j in jobs)
+            detail_fetched = 0
+            detail_skipped = 0
+
+            for job in jobs:
+                if str(job.url) in already_described:
+                    detail_skipped += 1
+                    continue
+
+                job_id = int(job.job_id_from_source) if job.job_id_from_source else None
+                job_description = self._fetch_job_description(company_endpoint, job_id)
+                detail_fetched += 1
+                if job_description:
+                    job.job_description = job_description
+                    logger.debug(
+                        f"Fetched description for job {job_id} ({len(job_description)} chars)"
+                    )
+                else:
+                    logger.debug(f"No description found for job {job_id}")
             
-            # Count how many jobs have descriptions
             jobs_with_descriptions = sum(1 for job in jobs if job.job_description)
             logger.info(
                 f"Fetched {len(jobs)} jobs from {company_name} "
-                f"({jobs_with_descriptions} with descriptions, {len(jobs) - jobs_with_descriptions} without)"
+                f"(detail fetched {detail_fetched}, skipped {detail_skipped}; "
+                f"{jobs_with_descriptions} with descriptions this run, "
+                f"{len(jobs) - jobs_with_descriptions} without)"
             )
             return jobs
             

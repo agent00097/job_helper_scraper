@@ -2,9 +2,12 @@
 Deduplication utilities to prevent duplicate jobs.
 """
 import hashlib
-from typing import Optional
+import logging
+from typing import Iterable, Optional, Set
 from models import JobData
 import db
+
+logger = logging.getLogger(__name__)
 
 
 def generate_content_hash(job: JobData) -> str:
@@ -84,3 +87,40 @@ def is_duplicate_job(job: JobData) -> bool:
         return True
     
     return False
+
+
+def urls_with_existing_description(urls: Iterable[str]) -> Set[str]:
+    """
+    Return URLs that already exist in jobs with a non-empty description.
+
+    Used by Greenhouse to skip per-job detail fetches for listings we already
+    fully stored. On DB failure returns an empty set so callers fail open and
+    still fetch descriptions.
+    """
+    cleaned = [str(u).strip() for u in urls if u and str(u).strip()]
+    if not cleaned:
+        return set()
+
+    try:
+        conn = db.get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT url
+                    FROM jobs
+                    WHERE url = ANY(%s)
+                      AND job_description IS NOT NULL
+                      AND btrim(job_description) <> ''
+                    """,
+                    (cleaned,),
+                )
+                return {str(row[0]) for row in cur.fetchall() if row and row[0]}
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning(
+            "urls_with_existing_description failed (%s); treating all as needing detail fetch",
+            exc,
+        )
+        return set()

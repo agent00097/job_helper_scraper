@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from models import JobData
 from sources.base_source import BaseSource
+from utils.deduplication import urls_with_existing_description
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
@@ -84,20 +85,58 @@ class WorkdaySource(BaseSource):
         if not postings:
             return []
 
-        jobs = []
+        # List-only parse first (needed for presence reconcile). Detail-fetch
+        # descriptions only for jobs that are new or stored without a description.
+        list_parsed: List[Tuple[Dict, JobData]] = []
         for posting in postings:
             try:
-                job = self._parse_job(posting, company_name, api_base, public_base)
+                job = self._parse_job(
+                    posting, company_name, public_base, detail=None
+                )
                 if job:
-                    jobs.append(job)
+                    list_parsed.append((posting, job))
             except Exception as e:
                 logger.warning("Error parsing Workday job from %s: %s", company_name, e)
                 continue
 
+        already_described = urls_with_existing_description(
+            str(job.url) for _, job in list_parsed
+        )
+        jobs: List[JobData] = []
+        detail_fetched = 0
+        detail_skipped = 0
+
+        for posting, list_job in list_parsed:
+            if str(list_job.url) in already_described:
+                detail_skipped += 1
+                jobs.append(list_job)
+                continue
+
+            external_path = posting.get("externalPath") or ""
+            detail = self._fetch_detail(api_base, external_path)
+            detail_fetched += 1
+            try:
+                enriched = self._parse_job(
+                    posting, company_name, public_base, detail=detail
+                )
+                jobs.append(enriched if enriched else list_job)
+            except Exception as e:
+                logger.warning(
+                    "Error enriching Workday job from %s (%s): %s",
+                    company_name, external_path, e,
+                )
+                jobs.append(list_job)
+
         jobs_with_desc = sum(1 for j in jobs if j.job_description)
         logger.info(
-            "Fetched %d jobs from %s (%d with descriptions, %d without)",
-            len(jobs), company_name, jobs_with_desc, len(jobs) - jobs_with_desc,
+            "Fetched %d jobs from %s "
+            "(detail fetched %d, skipped %d; %d with descriptions this run, %d without)",
+            len(jobs),
+            company_name,
+            detail_fetched,
+            detail_skipped,
+            jobs_with_desc,
+            len(jobs) - jobs_with_desc,
         )
         return jobs
 
@@ -150,9 +189,15 @@ class WorkdaySource(BaseSource):
         self,
         posting: Dict,
         company_name: str,
-        api_base: str,
         public_base: str,
+        detail: Optional[Dict] = None,
     ) -> Optional[JobData]:
+        """
+        Build JobData from a list posting.
+
+        When detail is None, only list fields are used (no HTTP). Pass the
+        detail JSON to fill description, employment type, and remote flags.
+        """
         external_path = posting.get("externalPath")
         if not external_path:
             raise ValueError("Workday posting missing externalPath")
@@ -164,8 +209,6 @@ class WorkdaySource(BaseSource):
         locations_text = posting.get("locationsText") or None
         date_posted = self._parse_date(posting.get("postedOn"))
 
-        # Per-job detail call for description and extra metadata.
-        detail = self._fetch_detail(api_base, external_path)
         description = None
         employment_type = None
         remote_allowed = False
