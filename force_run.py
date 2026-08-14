@@ -51,7 +51,7 @@ def main():
         
         # Create and run worker synchronously (not in a thread)
         logger.info(f"Running worker for {source_name}...")
-        worker = SourceWorker(source)
+        worker = SourceWorker(source, run_trigger="manual")
         stats = worker.run()
         
         # Print summary
