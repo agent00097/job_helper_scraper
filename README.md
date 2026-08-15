@@ -126,7 +126,7 @@ See `docs/` for more detailed documentation.
 
 This service is a **long-running Python worker** (`main.py` → `Scheduler` → background threads). It is **not** an HTTP server.
 
-**Keep this worker single-replica.** The Deployment is committed with `replicas: 1`. Scaling above one runs multiple schedulers and **duplicates scraping** against the same sources and database. There is **no Service** and **no Ingress** in this repo because the code does not expose an HTTP port.
+**Keep `jobscraper` (dispatcher) single-replica.** Scale **`jobscraper-company-worker`** instead — those pods consume `company_scrape_tasks` (one company board per message). Scaling the dispatcher duplicates enqueue. There is **no Service** and **no Ingress** because the code does not expose an HTTP port.
 
 ### Probes (no HTTP)
 
@@ -163,6 +163,8 @@ All deploy-related values are **repository secrets** (no repository variables re
 | `HETZNER_SSH_KEY` | Private key for that user (cluster API is not exposed to GitHub). |
 | `HETZNER_REPO_PATH` | Absolute path to this repo on the server (e.g. `/home/deploy/job-helper-scraper`) for `cd` before `git fetch` / deploy. |
 | `OPENAI_API_KEY` | Optional but recommended. Synced to cluster secret `jobscraper-openai` for skill-extraction embeddings. Without it, scrape still extracts skills via alias matching only. |
+| `JOBSCRAPER_RABBITMQ_USER` | Optional. Synced to `harco/jobscraper-rabbitmq` key `RABBITMQ_USER`. Leave unset if that secret already exists in the cluster. |
+| `JOBSCRAPER_RABBITMQ_PASSWORD` | Optional. Synced to `harco/jobscraper-rabbitmq` key `RABBITMQ_PASSWORD` (same user as `job_scrape_requests`, vhost `jobs`). |
 
 `GITHUB_TOKEN` is provided automatically for GHCR login and push.
 

@@ -13,6 +13,7 @@ NS="harco"
 kubectl apply -f "${ROOT}/configmap.yaml"
 sed "s|PLACEHOLDER_IMAGE|${IMAGE}|g" "${ROOT}/deployment.yaml" | kubectl apply -f -
 sed "s|PLACEHOLDER_IMAGE|${IMAGE}|g" "${ROOT}/deployment-rabbitmq-worker.yaml" | kubectl apply -f -
+sed "s|PLACEHOLDER_IMAGE|${IMAGE}|g" "${ROOT}/deployment-company-worker.yaml" | kubectl apply -f -
 
 kubectl get deployment jobscraper -n "${NS}"
 kubectl get pods -n "${NS}" -l app=jobscraper
@@ -35,3 +36,13 @@ fi
 
 kubectl get deployment jobscraper-rabbitmq-worker -n "${NS}"
 kubectl get pods -n "${NS}" -l app=jobscraper-rabbitmq-worker
+
+kubectl get deployment jobscraper-company-worker -n "${NS}" || true
+if ! kubectl rollout status "deployment/jobscraper-company-worker" -n "${NS}" --timeout=300s; then
+  kubectl describe deployment jobscraper-company-worker -n "${NS}" || true
+  kubectl get events -n "${NS}" --sort-by=.lastTimestamp | tail -n 30 || true
+  exit 1
+fi
+
+kubectl get deployment jobscraper-company-worker -n "${NS}"
+kubectl get pods -n "${NS}" -l app=jobscraper-company-worker

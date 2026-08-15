@@ -27,11 +27,12 @@ def _source(job):
 
 
 @patch("workers.source_worker.update_source_last_run")
-@patch("workers.source_worker.update_company_last_fetched")
-@patch("workers.source_worker.archive_jobs_missing_from_fetch", return_value=0)
-@patch("workers.source_worker.seen_keys_from_jobs", return_value=(set(), set()))
-@patch("workers.source_worker.save_jobs", return_value=(1, 0))
-@patch("workers.source_worker.queue_existing_company_enrichment")
+@patch("workers.source_worker.ScrapeRunRecorder.start", return_value=None)
+@patch("services.company_scrape.update_company_last_fetched")
+@patch("services.company_scrape.archive_jobs_missing_from_fetch", return_value=0)
+@patch("services.company_scrape.seen_keys_from_jobs", return_value=(set(), set()))
+@patch("services.company_scrape.save_jobs", return_value=(1, 0))
+@patch("services.company_scrape.queue_existing_company_enrichment")
 @patch("workers.source_worker.get_source_companies")
 def test_missing_logo_queues_existing_company_enrichment(
     get_companies,
@@ -40,6 +41,7 @@ def test_missing_logo_queues_existing_company_enrichment(
     _seen,
     _archive,
     _update_company,
+    _recorder_start,
     _update_source,
 ):
     get_companies.return_value = [_company()]
@@ -60,11 +62,12 @@ def test_missing_logo_queues_existing_company_enrichment(
 
 
 @patch("workers.source_worker.update_source_last_run")
-@patch("workers.source_worker.update_company_last_fetched")
-@patch("workers.source_worker.archive_jobs_missing_from_fetch", return_value=0)
-@patch("workers.source_worker.seen_keys_from_jobs", return_value=(set(), set()))
-@patch("workers.source_worker.save_jobs", return_value=(1, 0))
-@patch("workers.source_worker.queue_existing_company_enrichment")
+@patch("workers.source_worker.ScrapeRunRecorder.start", return_value=None)
+@patch("services.company_scrape.update_company_last_fetched")
+@patch("services.company_scrape.archive_jobs_missing_from_fetch", return_value=0)
+@patch("services.company_scrape.seen_keys_from_jobs", return_value=(set(), set()))
+@patch("services.company_scrape.save_jobs", return_value=(1, 0))
+@patch("services.company_scrape.queue_existing_company_enrichment")
 @patch("workers.source_worker.get_source_companies")
 def test_existing_logo_does_not_queue_enrichment(
     get_companies,
@@ -73,6 +76,7 @@ def test_existing_logo_does_not_queue_enrichment(
     _seen,
     _archive,
     _update_company,
+    _recorder_start,
     _update_source,
 ):
     get_companies.return_value = [_company("https://cdn.example.com/acme.png")]

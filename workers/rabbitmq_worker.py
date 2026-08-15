@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import signal
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pika
 from pika.adapters.blocking_connection import BlockingChannel
@@ -17,10 +17,17 @@ from workers.rabbitmq_settings import RabbitMQWorkerSettings, load_rabbitmq_work
 
 logger = logging.getLogger(__name__)
 
+BodyHandler = Callable[[bytes], MessageDisposition]
+
 
 class RabbitMQJobWorker:
-    def __init__(self, settings: Optional[RabbitMQWorkerSettings] = None):
+    def __init__(
+        self,
+        settings: Optional[RabbitMQWorkerSettings] = None,
+        on_body: Optional[BodyHandler] = None,
+    ):
         self.settings = settings or load_rabbitmq_worker_settings()
+        self._on_body = on_body or process_job_scrape_request_body
         self._channel: Optional[BlockingChannel] = None
         self._stopping = False
 
@@ -41,7 +48,7 @@ class RabbitMQJobWorker:
         _properties: Any,
         body: bytes,
     ) -> None:
-        disposition = process_job_scrape_request_body(body)
+        disposition = self._on_body(body)
         tag = method.delivery_tag
         if disposition == MessageDisposition.ACK:
             channel.basic_ack(delivery_tag=tag)

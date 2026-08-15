@@ -1,0 +1,71 @@
+# Competing consumers for company_scrape_tasks (one company board per message).
+# Scale this Deployment to parallelize ATS scrapes. Do NOT scale jobscraper (dispatcher).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jobscraper-company-worker
+  namespace: harco
+  labels:
+    app: jobscraper-company-worker
+spec:
+  replicas: 4
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: jobscraper-company-worker
+  template:
+    metadata:
+      labels:
+        app: jobscraper-company-worker
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: company-worker
+          image: PLACEHOLDER_IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "company_scrape_worker_main.py"]
+          envFrom:
+            - configMapRef:
+                name: jobscraper-config
+          env:
+            - name: RABBITMQ_HOST
+              value: "rabbitmq-0.rabbitmq-headless.infra.svc.cluster.local"
+            - name: RABBITMQ_QUEUE
+              value: "company_scrape_tasks"
+            - name: COMPANY_SCRAPE_QUEUE
+              value: "company_scrape_tasks"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-db
+                  key: DB_PASSWORD
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-rabbitmq
+                  key: RABBITMQ_PASSWORD
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-rabbitmq
+                  key: RABBITMQ_USER
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-openai
+                  key: OPENAI_API_KEY
+                  optional: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "750m"

@@ -15,3 +15,5 @@ data:
   # Skill extraction on scrape (writes job_skills). Embeddings need OPENAI_API_KEY secret.
   SKILL_EXTRACTION_ENABLED: "true"
   SKILL_EXTRACTION_EMBEDDINGS: "true"
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_VHOST: "jobs"

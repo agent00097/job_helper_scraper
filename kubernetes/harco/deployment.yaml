@@ -51,6 +51,19 @@ spec:
                   name: jobscraper-openai
                   key: OPENAI_API_KEY
                   optional: true
+            - name: RABBITMQ_HOST
+              value: "rabbitmq-0.rabbitmq-headless.infra.svc.cluster.local"
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-rabbitmq
+                  key: RABBITMQ_PASSWORD
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: jobscraper-rabbitmq
+                  key: RABBITMQ_USER
+                  optional: true
           # Bursts during scrapes (HTTP + DB); limits cap noisy neighbor impact on a single-node k3s host.
           resources:
             requests:

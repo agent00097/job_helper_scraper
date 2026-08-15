@@ -5,11 +5,8 @@ Example: python force_run.py greenhouse
 """
 import logging
 import sys
-import threading
 from scheduler import Scheduler
 from utils.source_loader import get_source_config
-from sources.source_factory import create_source
-from workers.source_worker import SourceWorker
 
 # Configure logging
 logging.basicConfig(
@@ -43,28 +40,11 @@ def main():
         sys.exit(1)
     
     try:
-        # Create source instance
-        source = create_source(source_config)
-        if not source:
-            logger.error(f"Failed to create source: {source_name}")
-            sys.exit(1)
-        
-        # Create and run worker synchronously (not in a thread)
         logger.info(f"Running worker for {source_name}...")
-        worker = SourceWorker(source, run_trigger="manual")
-        stats = worker.run()
-        
-        # Print summary
+        scheduler = Scheduler()
+        scheduler.run_source_worker(source_config, trigger="manual")
         logger.info("=" * 60)
-        logger.info(f"Force run completed for {source_name}")
-        logger.info(f"  Companies processed: {stats['companies_processed']}")
-        logger.info(f"  Total jobs fetched: {stats['total_jobs_fetched']}")
-        logger.info(f"  Jobs saved: {stats['jobs_saved']}")
-        logger.info(f"  Duplicates skipped: {stats['jobs_duplicates']}")
-        if stats['errors']:
-            logger.warning(f"  Errors: {len(stats['errors'])}")
-            for error in stats['errors']:
-                logger.warning(f"    - {error}")
+        logger.info(f"Force run dispatched for {source_name}")
         logger.info("=" * 60)
         
     except Exception as e:

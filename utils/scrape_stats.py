@@ -10,6 +10,7 @@ actual scraping workflow. All public helpers swallow exceptions and log them.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections import Counter
@@ -182,6 +183,42 @@ class ScrapeRunRecorder:
                 pass
 
         return cls(run_id=run_id, source_id=source_id, source_name=source_name)
+
+    @classmethod
+    def attach(cls, run_id: str, source_id: str, source_name: str) -> "ScrapeRunRecorder":
+        """Bind to an existing scrape_runs row (queue workers)."""
+        return cls(run_id=UUID(str(run_id)), source_id=source_id, source_name=source_name)
+
+    def set_queue_meta(self, queued: int) -> None:
+        """Mark this run as queue-dispatched with an expected company count."""
+        notes = json.dumps({"mode": "queue", "queued": int(queued)})
+        try:
+            conn = db.get_db_connection()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("scrape_stats: cannot connect to set queue meta: %s", exc)
+            return
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE scrape_runs
+                    SET notes = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (notes, self.run_id),
+                )
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("scrape_stats: failed to set queue meta for %s: %s", self.run_id, exc)
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def finish(self, notes: Optional[str] = None) -> None:
         """Finalize the run: compute status, duration, and error_summary."""
@@ -419,5 +456,183 @@ def _to_json(value):
     """psycopg accepts a python object cast to ::jsonb via json.dumps."""
     if value is None:
         return None
-    import json
     return json.dumps(value)
+
+
+def source_has_active_queue_run(source_id: str) -> bool:
+    """True if this source still has a queue-dispatched scrape_runs row in 'running'."""
+    try:
+        conn = db.get_db_connection()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scrape_stats: cannot check active queue run: %s", exc)
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM scrape_runs
+                WHERE source_id = %s
+                  AND status = 'running'
+                  AND notes IS NOT NULL
+                  AND notes LIKE '{%%'
+                  AND notes::jsonb->>'mode' = 'queue'
+                LIMIT 1
+                """,
+                (source_id,),
+            )
+            return cur.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scrape_stats: active queue run check failed: %s", exc)
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def finalize_completed_queue_runs() -> int:
+    """Close queue-mode scrape_runs whose company results have caught up.
+
+    Returns the number of runs finalized. Also stamps job_sources.last_run_at.
+    """
+    try:
+        conn = db.get_db_connection()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scrape_stats: cannot finalize queue runs: %s", exc)
+        return 0
+
+    finalized = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, source_id::text, source_name, notes, started_at
+                FROM scrape_runs
+                WHERE status = 'running'
+                  AND notes IS NOT NULL
+                  AND notes LIKE '{%%'
+                  AND notes::jsonb->>'mode' = 'queue'
+                """
+            )
+            rows = cur.fetchall()
+
+        for run_id, source_id, source_name, notes, started_at in rows:
+            try:
+                meta = json.loads(notes) if isinstance(notes, str) else (notes or {})
+                queued = int(meta.get("queued") or 0)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if queued <= 0:
+                continue
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS done,
+                        COUNT(*) FILTER (WHERE status = 'success') AS ok,
+                        COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                        COALESCE(SUM(jobs_fetched), 0),
+                        COALESCE(SUM(jobs_saved), 0),
+                        COALESCE(SUM(jobs_duplicates), 0),
+                        COALESCE(SUM(jobs_archived), 0)
+                    FROM scrape_company_results
+                    WHERE run_id = %s
+                    """,
+                    (run_id,),
+                )
+                done, ok, failed, fetched, saved, dupes, archived = cur.fetchone()
+
+            done = int(done or 0)
+            if done < queued:
+                logger.info(
+                    "scrape_run drain source=%s run_id=%s %d/%d",
+                    source_name,
+                    run_id,
+                    done,
+                    queued,
+                )
+                continue
+
+            ok = int(ok or 0)
+            failed = int(failed or 0)
+            if failed == 0:
+                status = "success"
+            elif ok == 0:
+                status = "failed"
+            else:
+                status = "partial"
+
+            duration_ms = None
+            if started_at is not None:
+                try:
+                    duration_ms = int((datetime.utcnow() - started_at).total_seconds() * 1000)
+                except Exception:  # noqa: BLE001
+                    duration_ms = None
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE scrape_runs
+                    SET status = %s,
+                        finished_at = CURRENT_TIMESTAMP,
+                        duration_ms = %s,
+                        companies_processed = %s,
+                        companies_succeeded = %s,
+                        companies_failed = %s,
+                        total_jobs_fetched = %s,
+                        jobs_saved = %s,
+                        jobs_duplicates = %s,
+                        jobs_archived = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status = 'running'
+                    """,
+                    (
+                        status,
+                        duration_ms,
+                        done,
+                        ok,
+                        failed,
+                        int(fetched or 0),
+                        int(saved or 0),
+                        int(dupes or 0),
+                        int(archived or 0),
+                        run_id,
+                    ),
+                )
+                if cur.rowcount:
+                    cur.execute(
+                        """
+                        UPDATE job_sources
+                        SET last_run_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        """,
+                        (source_id,),
+                    )
+                    finalized += 1
+                    logger.info(
+                        "scrape_run complete source=%s run_id=%s status=%s "
+                        "done=%d ok=%d fail=%d",
+                        source_name,
+                        run_id,
+                        status,
+                        done,
+                        ok,
+                        failed,
+                    )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scrape_stats: finalize queue runs failed: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return finalized

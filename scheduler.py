@@ -1,13 +1,21 @@
 """
-Scheduler for managing periodic job source workers.
+Dispatch ATS company scrapes to RabbitMQ, keep JobBank in-process.
 """
 import logging
 import time
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List
+
+from services.company_scrape import uses_company_scrape_queue
+from services.company_scrape_queue import publish_company_scrape_tasks
 from sources.source_factory import create_source
-from utils.source_loader import get_source_config
+from utils.scrape_stats import (
+    ScrapeRunRecorder,
+    finalize_completed_queue_runs,
+    source_has_active_queue_run,
+)
+from utils.source_loader import get_source_companies, get_source_config
 from workers.source_worker import SourceWorker
 
 logger = logging.getLogger(__name__)
@@ -15,204 +23,189 @@ logger = logging.getLogger(__name__)
 
 class Scheduler:
     """Scheduler that manages periodic execution of source workers."""
-    
+
     def __init__(self):
-        """Initialize the scheduler."""
         self.running = False
         self.workers: Dict[str, threading.Thread] = {}
         self.source_configs: Dict[str, dict] = {}
-    
+
     def load_sources(self) -> List[dict]:
-        """
-        Load all enabled sources from the database.
-        
-        Returns:
-            List of source configurations
-        """
-        # For now, we'll load sources manually
-        # In the future, we can query all enabled sources from database
-        sources:list = []
-        
-        # Load Greenhouse
-        greenhouse_config = get_source_config("greenhouse")
-        if greenhouse_config and greenhouse_config.get("enabled"):
-            sources.append(greenhouse_config)
-
-        # Load Job Bank (incremental daily run; backfill uses scripts/jobbank_backfill.py)
-        jobbank_config = get_source_config("jobbank")
-        if jobbank_config and jobbank_config.get("enabled"):
-            sources.append(jobbank_config)
-
-        ashby_config = get_source_config("ashby")
-        if ashby_config and ashby_config.get("enabled"):
-            sources.append(ashby_config)
-
-        lever_config = get_source_config("lever")
-        if lever_config and lever_config.get("enabled"):
-            sources.append(lever_config)
-
-        workday_config = get_source_config("workday")
-        if workday_config and workday_config.get("enabled"):
-            sources.append(workday_config)
-
-        
+        sources: list = []
+        for name in ("greenhouse", "jobbank", "ashby", "lever", "workday"):
+            cfg = get_source_config(name)
+            if cfg and cfg.get("enabled"):
+                sources.append(cfg)
         return sources
-    
+
     def should_run_source(self, source_config: dict) -> bool:
-        """
-        Check if a source should run based on its schedule.
-        
-        Args:
-            source_config: Source configuration
-            
-        Returns:
-            True if source should run, False otherwise
-        """
+        source_name = source_config["name"]
+        if uses_company_scrape_queue(source_name) and source_has_active_queue_run(
+            source_config["id"]
+        ):
+            logger.info(
+                "Skipping dispatch for %s — previous queue run still draining",
+                source_name,
+            )
+            return False
+
         last_run = source_config.get("last_run_at")
         schedule_hours = source_config.get("schedule_hours", 6)
-        
+
         if not last_run:
-            return True  # Never run before
-        
-        # Check if enough time has passed
-        # Handle both datetime objects and strings
+            return True
+
         if isinstance(last_run, str):
             try:
                 last_run_time = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
-                return True  # If we can't parse, run it
+                return True
         elif isinstance(last_run, datetime):
             last_run_time = last_run
         else:
-            return True  # Unknown type, run it
-        
+            return True
+
         next_run_time = last_run_time + timedelta(hours=schedule_hours)
         return datetime.now() >= next_run_time
-    
-    def run_source_worker(self, source_config: dict):
-        """
-        Run a single source worker.
-        
-        Args:
-            source_config: Source configuration
-        """
+
+    def dispatch_source_to_queue(self, source_config: dict, trigger: str = "scheduler") -> None:
         source_name = source_config["name"]
-        
+        source_id = source_config["id"]
+        companies = get_source_companies(source_name)
+        recorder = ScrapeRunRecorder.start(
+            source_id=source_id,
+            source_name=source_name,
+            trigger=trigger,
+        )
+        if recorder is None:
+            logger.error("Cannot open scrape_runs row for %s — skip dispatch", source_name)
+            return
+
+        run_id = str(recorder.run_id)
+        if not companies:
+            recorder.set_queue_meta(queued=0)
+            recorder.finish(notes='{"mode":"queue","queued":0}')
+            logger.warning("No companies to enqueue for %s", source_name)
+            return
+
+        recorder.set_queue_meta(queued=0)
+        logger.info(
+            "scrape_run dispatch source=%s run_id=%s companies=%d",
+            source_name,
+            run_id,
+            len(companies),
+        )
+        published = publish_company_scrape_tasks(
+            run_id=run_id,
+            source_id=str(source_id),
+            source_name=source_name,
+            companies=companies,
+            trigger=trigger,
+        )
+        recorder.set_queue_meta(queued=published)
+        if published == 0:
+            recorder.finish(notes='{"mode":"queue","queued":0}')
+            logger.error("Published 0 company tasks for %s run_id=%s", source_name, run_id)
+            return
+        logger.info(
+            "scrape_run queued source=%s run_id=%s published=%d — workers will scrape",
+            source_name,
+            run_id,
+            published,
+        )
+
+    def run_source_worker(self, source_config: dict, trigger: str = "scheduler"):
+        source_name = source_config["name"]
         try:
-            # Create source instance
+            if uses_company_scrape_queue(source_name):
+                self.dispatch_source_to_queue(source_config, trigger=trigger)
+                return
+
             source = create_source(source_config)
             if not source:
-                logger.error(f"Failed to create source: {source_name}")
+                logger.error("Failed to create source: %s", source_name)
                 return
-            
-            # Create and run worker
-            worker = SourceWorker(source)
+            worker = SourceWorker(source, run_trigger=trigger)
             stats = worker.run()
-            
-            logger.info(f"Worker completed for {source_name}: {stats}")
-            
+            logger.info("Worker completed for %s: %s", source_name, stats)
         except Exception as e:
-            logger.error(f"Error running worker for {source_name}: {e}", exc_info=True)
-    
+            logger.error("Error running worker for %s: %s", source_name, e, exc_info=True)
+
     def run_source_periodically(self, source_config: dict):
-        """
-        Run a source worker periodically in a separate thread.
-        
-        Args:
-            source_config: Source configuration
-        """
         source_name = source_config["name"]
         schedule_hours = source_config.get("schedule_hours", 6)
-        
-        logger.info(f"Starting periodic worker for {source_name} (every {schedule_hours} hours)")
-        
+        logger.info(
+            "Starting periodic worker for %s (every %s hours)",
+            source_name,
+            schedule_hours,
+        )
+
         while self.running:
             try:
-                # Check if it's time to run
+                try:
+                    finalize_completed_queue_runs()
+                except Exception:
+                    logger.exception("finalize_completed_queue_runs failed")
+
                 if self.should_run_source(source_config):
-                    logger.info(f"Running scheduled worker for {source_name}")
+                    logger.info("Running scheduled worker for %s", source_name)
                     self.run_source_worker(source_config)
-                    
-                    # Reload source config to get updated last_run_at
                     updated_config = get_source_config(source_name)
                     if updated_config:
                         source_config.update(updated_config)
                 else:
-                    logger.debug(f"Not yet time to run {source_name}, waiting...")
-                
-                # Sleep for a shorter interval and check again
-                time.sleep(60)  # Check every minute
-                
+                    logger.debug("Not yet time to run %s, waiting...", source_name)
+
+                time.sleep(60)
             except Exception as e:
-                logger.error(f"Error in periodic worker for {source_name}: {e}", exc_info=True)
-                time.sleep(300)  # Wait 5 minutes on error before retrying
-    
+                logger.error(
+                    "Error in periodic worker for %s: %s", source_name, e, exc_info=True
+                )
+                time.sleep(300)
+
     def start(self):
-        """Start the scheduler."""
         logger.info("Starting scheduler...")
         self.running = True
-        
-        # Load all enabled sources
         sources = self.load_sources()
-        
         if not sources:
             logger.warning("No enabled sources found")
             return
-        
-        logger.info(f"Loaded {len(sources)} enabled source(s)")
-        
-        # One thread per source. run_source_periodically already scrapes on
-        # its first loop when the source is due — do not also spawn an
-        # immediate worker here or two passes walk the same list at once.
+
+        logger.info("Loaded %s enabled source(s)", len(sources))
         for source_config in sources:
             source_name = source_config["name"]
             thread = threading.Thread(
                 target=self.run_source_periodically,
                 args=(source_config,),
                 daemon=True,
-                name=f"worker-{source_name}"
+                name=f"worker-{source_name}",
             )
             thread.start()
             self.workers[source_name] = thread
-        
-        logger.info(f"Scheduler started with {len(self.workers)} worker(s)")
-    
+
+        logger.info("Scheduler started with %s worker(s)", len(self.workers))
+
     def force_run_source(self, source_name: str):
-        """
-        Force run a source immediately, bypassing schedule checks.
-        
-        Args:
-            source_name: Name of the source to run (e.g., 'greenhouse')
-        """
-        logger.info(f"Force running source: {source_name}")
+        logger.info("Force running source: %s", source_name)
         source_config = get_source_config(source_name)
-        
         if not source_config:
-            logger.error(f"Source not found: {source_name}")
+            logger.error("Source not found: %s", source_name)
             return
-        
         if not source_config.get("enabled"):
-            logger.warning(f"Source {source_name} is disabled")
+            logger.warning("Source %s is disabled", source_name)
             return
-        
-        # Run in a separate thread so we don't block
         thread = threading.Thread(
             target=self.run_source_worker,
-            args=(source_config,),
+            args=(source_config, "manual"),
             daemon=True,
-            name=f"force-run-{source_name}"
+            name=f"force-run-{source_name}",
         )
         thread.start()
-        logger.info(f"Force run thread started for {source_name}")
-    
+        logger.info("Force run thread started for %s", source_name)
+
     def stop(self):
-        """Stop the scheduler."""
         logger.info("Stopping scheduler...")
         self.running = False
-        
-        # Wait for all workers to finish (with timeout)
         for source_name, thread in self.workers.items():
-            logger.info(f"Waiting for worker {source_name} to finish...")
+            logger.info("Waiting for worker %s to finish...", source_name)
             thread.join(timeout=30)
-        
         logger.info("Scheduler stopped")
