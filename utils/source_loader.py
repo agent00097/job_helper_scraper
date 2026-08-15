@@ -67,6 +67,7 @@ def get_source_companies(source_name: str) -> List[Dict]:
                 FROM source_companies
                 WHERE jsonb_exists(source_endpoints, %s)
                   AND enabled = TRUE
+                ORDER BY company_name ASC
             """, (source_name, source_name))
 
             companies = []
