@@ -2,6 +2,7 @@
 Worker for running a job source and fetching jobs.
 """
 import logging
+import time
 from uuid import UUID
 
 from sources.base_source import BaseSource
@@ -15,6 +16,44 @@ from utils.job_archive import (
 from utils.scrape_stats import ScrapeRunRecorder
 
 logger = logging.getLogger(__name__)
+
+# INFO heartbeat so kubectl logs stay readable on multi-thousand-company runs.
+_PROGRESS_EVERY = 25
+
+
+def _eta_seconds(done: int, total: int, elapsed: float) -> int | None:
+    if done <= 0 or elapsed <= 0 or done >= total:
+        return 0 if done >= total else None
+    return int((total - done) * (elapsed / done))
+
+
+def _log_run_progress(
+    *,
+    source_name: str,
+    run_id: str | None,
+    index: int,
+    total: int,
+    elapsed: float,
+    ok: int,
+    failed: int,
+    last_company: str,
+) -> None:
+    eta = _eta_seconds(index, total, elapsed)
+    pct = (100.0 * index / total) if total else 100.0
+    logger.info(
+        "scrape_run progress source=%s run_id=%s %d/%d (%.1f%%) "
+        "elapsed=%ds eta=%s ok=%d fail=%d last=%s",
+        source_name,
+        run_id or "none",
+        index,
+        total,
+        pct,
+        int(elapsed),
+        f"{eta}s" if eta is not None else "?",
+        ok,
+        failed,
+        last_company,
+    )
 
 
 def queue_existing_company_enrichment(**kwargs):
@@ -47,7 +86,12 @@ class SourceWorker:
         Returns:
             Dictionary with statistics about the run.
         """
-        logger.info(f"Starting worker for source: {self.source.name}")
+        logger.info(
+            "scrape_run begin source=%s trigger=%s source_id=%s",
+            self.source.name,
+            self.run_trigger,
+            self.source.source_id,
+        )
 
         # Open a scrape_runs row up-front. If the DB is unreachable this returns
         # None; we still run the scrape, just without persisted stats.
@@ -56,6 +100,15 @@ class SourceWorker:
             source_name=self.source.name,
             trigger=self.run_trigger,
         )
+        run_id = str(recorder.run_id) if recorder is not None else None
+        if recorder is None:
+            logger.warning(
+                "scrape_run stats recorder unavailable source=%s — "
+                "companies will scrape but admin 'last run' stays empty",
+                self.source.name,
+            )
+        else:
+            logger.info("scrape_run opened source=%s run_id=%s", self.source.name, run_id)
 
         # Get all companies for this source (new JSONB schema — keyed by source name)
         companies = get_source_companies(self.source.name)
@@ -72,20 +125,31 @@ class SourceWorker:
                 "jobs_duplicates": 0,
                 "jobs_archived": 0,
                 "errors": [],
-                "run_id": str(recorder.run_id) if recorder else None,
+                "run_id": run_id,
             }
 
-        logger.info(f"Processing {len(companies)} companies for {self.source.name}")
+        total = len(companies)
+        logger.info(
+            "scrape_run loaded source=%s run_id=%s companies=%d first=%s last=%s",
+            self.source.name,
+            run_id or "none",
+            total,
+            companies[0]["company_name"],
+            companies[-1]["company_name"],
+        )
 
         total_jobs_fetched = 0
         total_jobs_saved = 0
         total_jobs_duplicates = 0
         total_jobs_archived = 0
         errors = []
+        ok_count = 0
+        fail_count = 0
         reconcile = supports_presence_reconcile(self.source.name)
+        started_at = time.monotonic()
 
         # Process each company
-        for company in companies:
+        for index, company in enumerate(companies, start=1):
             company_name = company["company_name"]
             company_endpoint = company["company_endpoint"]
             company_id = company["id"]
@@ -98,7 +162,13 @@ class SourceWorker:
 
             with company_ctx as cr:
                 try:
-                    logger.info(f"Fetching jobs for {company_name} from {self.source.name}")
+                    logger.debug(
+                        "Fetching jobs for %s from %s (%d/%d)",
+                        company_name,
+                        self.source.name,
+                        index,
+                        total,
+                    )
 
                     # Fetch jobs from source. API sources raise on HTTP failure so we
                     # never treat a failed board pull as "all jobs closed".
@@ -170,14 +240,27 @@ class SourceWorker:
                         duplicates=duplicates_count,
                         archived=archived_count,
                     )
+                    ok_count += 1
 
                 except Exception as e:
                     error_msg = f"Error processing {company_name}: {str(e)}"
                     logger.error(error_msg)
                     errors.append(error_msg)
                     cr.mark_failure(e)
+                    fail_count += 1
                     # Swallow so one bad company doesn't kill the whole run.
-                    continue
+
+            if index == 1 or index % _PROGRESS_EVERY == 0 or index == total:
+                _log_run_progress(
+                    source_name=self.source.name,
+                    run_id=run_id,
+                    index=index,
+                    total=total,
+                    elapsed=time.monotonic() - started_at,
+                    ok=ok_count,
+                    failed=fail_count,
+                    last_company=company_name,
+                )
 
         # Update source last run timestamp
         update_source_last_run(self.source.source_id)
@@ -190,17 +273,25 @@ class SourceWorker:
             "jobs_duplicates": total_jobs_duplicates,
             "jobs_archived": total_jobs_archived,
             "errors": errors,
-            "run_id": str(recorder.run_id) if recorder else None,
+            "run_id": run_id,
         }
 
         if recorder is not None:
             recorder.finish()
 
         logger.info(
-            f"Completed worker for {self.source.name}: "
-            f"{stats['jobs_saved']} jobs saved, "
-            f"{stats['jobs_duplicates']} duplicates skipped, "
-            f"{stats['jobs_archived']} archived"
+            "scrape_run complete source=%s run_id=%s companies=%d ok=%d fail=%d "
+            "fetched=%d saved=%d dupes=%d archived=%d elapsed=%ds",
+            self.source.name,
+            run_id or "none",
+            total,
+            ok_count,
+            fail_count,
+            total_jobs_fetched,
+            total_jobs_saved,
+            total_jobs_duplicates,
+            total_jobs_archived,
+            int(time.monotonic() - started_at),
         )
 
         return stats

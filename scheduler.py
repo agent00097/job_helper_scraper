@@ -161,22 +161,11 @@ class Scheduler:
         
         logger.info(f"Loaded {len(sources)} enabled source(s)")
         
-        # Start a thread for each source
+        # One thread per source. run_source_periodically already scrapes on
+        # its first loop when the source is due — do not also spawn an
+        # immediate worker here or two passes walk the same list at once.
         for source_config in sources:
             source_name = source_config["name"]
-            
-            # Run immediately on startup if needed
-            if self.should_run_source(source_config):
-                logger.info(f"Running {source_name} immediately on startup")
-                # Run in a separate thread so we don't block
-                thread = threading.Thread(
-                    target=self.run_source_worker,
-                    args=(source_config,),
-                    daemon=True
-                )
-                thread.start()
-            
-            # Start periodic worker thread
             thread = threading.Thread(
                 target=self.run_source_periodically,
                 args=(source_config,),
