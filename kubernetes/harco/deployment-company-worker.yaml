@@ -22,6 +22,8 @@ spec:
       labels:
         app: jobscraper-company-worker
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: harco-worker-home
       imagePullSecrets:
         - name: ghcr-pull-secret
       terminationGracePeriodSeconds: 60
