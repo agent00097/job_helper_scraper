@@ -7,6 +7,8 @@ company_scrape_tasks RabbitMQ consumer.
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
@@ -29,6 +31,13 @@ QUEUE_DISPATCH_SOURCES = frozenset({"ashby", "greenhouse", "lever", "workday"})
 
 def uses_company_scrape_queue(source_name: str) -> bool:
     return source_name in QUEUE_DISPATCH_SOURCES
+
+
+def _company_scrape_timeout_seconds() -> int:
+    try:
+        return max(0, int(os.environ.get("COMPANY_SCRAPE_TIMEOUT_SECONDS", "600")))
+    except ValueError:
+        return 600
 
 
 def queue_existing_company_enrichment(**kwargs):
@@ -54,7 +63,31 @@ def scrape_one_company(source: BaseSource, company: dict[str, Any]) -> CompanySc
 
     `company` keys: id, company_name, normalized_name, company_endpoint,
     logo_url (optional), domain (optional).
+
+    Enforces COMPANY_SCRAPE_TIMEOUT_SECONDS (default 600) wall-clock limit so
+    one pathological board cannot hold a worker forever.
     """
+    timeout = _company_scrape_timeout_seconds()
+    if timeout <= 0:
+        return _scrape_one_company_impl(source, company)
+
+    company_name = company.get("company_name", "?")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(_scrape_one_company_impl, source, company)
+        try:
+            return fut.result(timeout=timeout)
+        except FuturesTimeoutError:
+            err = TimeoutError(
+                f"{source.name}/{company_name}: exceeded "
+                f"{timeout}s company scrape timeout"
+            )
+            logger.error("%s", err)
+            return CompanyScrapeOutcome(ok=False, error=err)
+
+
+def _scrape_one_company_impl(
+    source: BaseSource, company: dict[str, Any]
+) -> CompanyScrapeOutcome:
     company_name = company["company_name"]
     company_endpoint = company["company_endpoint"]
     company_id = company["id"]

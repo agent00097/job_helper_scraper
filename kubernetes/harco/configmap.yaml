@@ -17,3 +17,8 @@ data:
   SKILL_EXTRACTION_EMBEDDINGS: "true"
   RABBITMQ_PORT: "5672"
   RABBITMQ_VHOST: "jobs"
+  # Abandon queue scrape_runs stuck with done < queued (hours + minutes stall).
+  SCRAPE_QUEUE_STALE_AFTER_HOURS: "4"
+  SCRAPE_QUEUE_STALL_MINUTES: "60"
+  # Wall-clock cap per company board scrape (seconds); 0 disables.
+  COMPANY_SCRAPE_TIMEOUT_SECONDS: "600"

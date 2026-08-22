@@ -12,15 +12,36 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
 import db
 
 logger = logging.getLogger(__name__)
+
+# Persist retries: never ACK a company task until a result row lands.
+_PERSIST_ATTEMPTS = 3
+_PERSIST_RETRY_SLEEP_SECONDS = 0.25
+
+# Stale queue-run recovery (env-overridable). A run is abandoned when it is
+# older than SCRAPE_QUEUE_STALE_AFTER_HOURS AND has made no new company
+# progress for SCRAPE_QUEUE_STALL_MINUTES (or never got any results).
+def _stale_after_hours() -> float:
+    try:
+        return max(0.0, float(os.environ.get("SCRAPE_QUEUE_STALE_AFTER_HOURS", "4")))
+    except ValueError:
+        return 4.0
+
+
+def _stall_minutes() -> float:
+    try:
+        return max(0.0, float(os.environ.get("SCRAPE_QUEUE_STALL_MINUTES", "60")))
+    except ValueError:
+        return 60.0
 
 
 # Keep in sync with the scrape_error_bucket enum in
@@ -309,7 +330,8 @@ class ScrapeRunRecorder:
         error_type: Optional[str],
         error_message: Optional[str],
         http_status: Optional[int],
-    ) -> None:
+    ) -> bool:
+        """Insert the company result row. Returns True if persisted (or already existed)."""
         self._companies_processed += 1
         if status == "success":
             self._companies_succeeded += 1
@@ -322,58 +344,66 @@ class ScrapeRunRecorder:
         if error_bucket:
             self._error_buckets[error_bucket] += 1
 
-        try:
-            conn = db.get_db_connection()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "scrape_stats: cannot connect to record company result "
-                "(run=%s company=%s): %s",
-                self.run_id, company_id, exc,
-            )
-            return
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO scrape_company_results (
-                        run_id, company_id, source_id, source_name,
-                        status, started_at, finished_at, duration_ms,
-                        jobs_fetched, jobs_saved, jobs_duplicates, jobs_archived,
-                        error_bucket, error_type, error_message, http_status
-                    ) VALUES (
-                        %s, %s, %s, %s,
-                        %s, %s, CURRENT_TIMESTAMP, %s,
-                        %s, %s, %s, %s,
-                        %s::scrape_error_bucket, %s, %s, %s
+        params = (
+            self.run_id, company_id, self.source_id, self.source_name,
+            status, started_at, duration_ms,
+            jobs_fetched, jobs_saved, jobs_duplicates, jobs_archived,
+            error_bucket, error_type,
+            (error_message[:_ERROR_MESSAGE_MAX_LEN] if error_message else None),
+            http_status,
+        )
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, _PERSIST_ATTEMPTS + 1):
+            conn = None
+            try:
+                conn = db.get_db_connection()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO scrape_company_results (
+                            run_id, company_id, source_id, source_name,
+                            status, started_at, finished_at, duration_ms,
+                            jobs_fetched, jobs_saved, jobs_duplicates, jobs_archived,
+                            error_bucket, error_type, error_message, http_status
+                        ) VALUES (
+                            %s, %s, %s, %s,
+                            %s, %s, CURRENT_TIMESTAMP, %s,
+                            %s, %s, %s, %s,
+                            %s::scrape_error_bucket, %s, %s, %s
+                        )
+                        ON CONFLICT (run_id, company_id) DO NOTHING
+                        """,
+                        params,
                     )
-                    ON CONFLICT (run_id, company_id) DO NOTHING
-                    """,
-                    (
-                        self.run_id, company_id, self.source_id, self.source_name,
-                        status, started_at, duration_ms,
-                        jobs_fetched, jobs_saved, jobs_duplicates, jobs_archived,
-                        error_bucket, error_type,
-                        (error_message[:_ERROR_MESSAGE_MAX_LEN] if error_message else None),
-                        http_status,
-                    ),
+                    conn.commit()
+                return True
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.warning(
+                    "scrape_stats: failed to record company result "
+                    "(run=%s company=%s attempt=%d/%d): %s",
+                    self.run_id, company_id, attempt, _PERSIST_ATTEMPTS, exc,
                 )
-                conn.commit()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "scrape_stats: failed to record company result "
-                "(run=%s company=%s): %s",
-                self.run_id, company_id, exc,
-            )
-            try:
-                conn.rollback()
-            except Exception:  # noqa: BLE001
-                pass
-        finally:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001
-                pass
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if attempt < _PERSIST_ATTEMPTS:
+                    time.sleep(_PERSIST_RETRY_SLEEP_SECONDS * attempt)
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        logger.error(
+            "scrape_stats: giving up recording company result "
+            "(run=%s company=%s): %s",
+            self.run_id, company_id, last_exc,
+        )
+        return False
 
 
 class CompanyResultCtx:
@@ -393,6 +423,7 @@ class CompanyResultCtx:
         self._error_type: Optional[str] = None
         self._error_message: Optional[str] = None
         self._http_status: Optional[int] = None
+        self.persisted: bool = False
 
     # explicit setters keep the call sites readable
     def mark_success(
@@ -418,8 +449,10 @@ class CompanyResultCtx:
         self._error_message = str(exc) or repr(exc)
         self._http_status = http_status
 
-    def mark_skipped(self) -> None:
+    def mark_skipped(self, reason: str = "skipped") -> None:
         self._status = "skipped"
+        self._error_type = "skipped"
+        self._error_message = reason
 
     def __enter__(self) -> "CompanyResultCtx":
         return self
@@ -434,7 +467,7 @@ class CompanyResultCtx:
                 self.mark_success()
 
         duration_ms = int((time.monotonic() - self._started_monotonic) * 1000)
-        self._recorder._record_company_result(
+        self.persisted = self._recorder._record_company_result(
             company_id=self._company_id,
             status=self._status or "failed",
             started_at=self._started_at,
@@ -450,6 +483,21 @@ class CompanyResultCtx:
         )
         # never suppress the caller's exception
         return False
+
+
+def record_dropped_company_task(
+    *,
+    run_id: str,
+    source_id: str,
+    source_name: str,
+    company_id: str,
+    reason: str,
+) -> bool:
+    """Credit a terminal drop so finalize can reach queued count. Returns persist ok."""
+    recorder = ScrapeRunRecorder.attach(run_id, source_id, source_name)
+    with recorder.company(company_id) as cr:
+        cr.mark_failure(RuntimeError(reason))
+    return cr.persisted
 
 
 def _to_json(value):
@@ -492,8 +540,167 @@ def source_has_active_queue_run(source_id: str) -> bool:
             pass
 
 
+def _parse_queue_meta(notes) -> tuple[Optional[dict], int]:
+    try:
+        meta = json.loads(notes) if isinstance(notes, str) else (notes or {})
+        if not isinstance(meta, dict):
+            return None, 0
+        queued = int(meta.get("queued") or 0)
+        return meta, queued
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, 0
+
+
+def _close_queue_run(
+    conn,
+    *,
+    run_id: str,
+    source_id: str,
+    source_name: str,
+    started_at,
+    done: int,
+    ok: int,
+    failed: int,
+    fetched: int,
+    saved: int,
+    dupes: int,
+    archived: int,
+    notes: Optional[str] = None,
+    log_label: str = "complete",
+    incomplete: bool = False,
+) -> bool:
+    if done == 0:
+        status = "failed"
+    elif incomplete:
+        # Missing results / abandoned early — never report pure success.
+        status = "partial" if ok > 0 else "failed"
+    elif failed == 0:
+        status = "success"
+    elif ok == 0:
+        status = "failed"
+    else:
+        status = "partial"
+
+    duration_ms = None
+    if started_at is not None:
+        try:
+            duration_ms = int((datetime.utcnow() - started_at).total_seconds() * 1000)
+        except Exception:  # noqa: BLE001
+            duration_ms = None
+
+    with conn.cursor() as cur:
+        if notes is not None:
+            cur.execute(
+                """
+                UPDATE scrape_runs
+                SET status = %s,
+                    finished_at = CURRENT_TIMESTAMP,
+                    duration_ms = %s,
+                    companies_processed = %s,
+                    companies_succeeded = %s,
+                    companies_failed = %s,
+                    total_jobs_fetched = %s,
+                    jobs_saved = %s,
+                    jobs_duplicates = %s,
+                    jobs_archived = %s,
+                    notes = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = 'running'
+                """,
+                (
+                    status,
+                    duration_ms,
+                    done,
+                    ok,
+                    failed,
+                    fetched,
+                    saved,
+                    dupes,
+                    archived,
+                    notes,
+                    run_id,
+                ),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE scrape_runs
+                SET status = %s,
+                    finished_at = CURRENT_TIMESTAMP,
+                    duration_ms = %s,
+                    companies_processed = %s,
+                    companies_succeeded = %s,
+                    companies_failed = %s,
+                    total_jobs_fetched = %s,
+                    jobs_saved = %s,
+                    jobs_duplicates = %s,
+                    jobs_archived = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = 'running'
+                """,
+                (
+                    status,
+                    duration_ms,
+                    done,
+                    ok,
+                    failed,
+                    fetched,
+                    saved,
+                    dupes,
+                    archived,
+                    run_id,
+                ),
+            )
+        if not cur.rowcount:
+            return False
+        cur.execute(
+            """
+            UPDATE job_sources
+            SET last_run_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (source_id,),
+        )
+    logger.info(
+        "scrape_run %s source=%s run_id=%s status=%s done=%d ok=%d fail=%d",
+        log_label,
+        source_name,
+        run_id,
+        status,
+        done,
+        ok,
+        failed,
+    )
+    return True
+
+
+def _company_result_counts(conn, run_id: str):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS done,
+                COUNT(*) FILTER (WHERE status = 'success') AS ok,
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                COALESCE(SUM(jobs_fetched), 0),
+                COALESCE(SUM(jobs_saved), 0),
+                COALESCE(SUM(jobs_duplicates), 0),
+                COALESCE(SUM(jobs_archived), 0),
+                MAX(finished_at) AS last_finished
+            FROM scrape_company_results
+            WHERE run_id = %s
+            """,
+            (run_id,),
+        )
+        return cur.fetchone()
+
+
 def finalize_completed_queue_runs() -> int:
     """Close queue-mode scrape_runs whose company results have caught up.
+
+    Also abandons stale runs that will never reach queued (lost messages /
+    unrecorded results) so the scheduler can dispatch again.
 
     Returns the number of runs finalized. Also stamps job_sources.last_run_at.
     """
@@ -504,6 +711,10 @@ def finalize_completed_queue_runs() -> int:
         return 0
 
     finalized = 0
+    stale_after = timedelta(hours=_stale_after_hours())
+    stall_for = timedelta(minutes=_stall_minutes())
+    now = datetime.utcnow()
+
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -519,34 +730,41 @@ def finalize_completed_queue_runs() -> int:
             rows = cur.fetchall()
 
         for run_id, source_id, source_name, notes, started_at in rows:
-            try:
-                meta = json.loads(notes) if isinstance(notes, str) else (notes or {})
-                queued = int(meta.get("queued") or 0)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if queued <= 0:
+            meta, queued = _parse_queue_meta(notes)
+            if meta is None:
                 continue
 
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        COUNT(*) AS done,
-                        COUNT(*) FILTER (WHERE status = 'success') AS ok,
-                        COUNT(*) FILTER (WHERE status = 'failed') AS failed,
-                        COALESCE(SUM(jobs_fetched), 0),
-                        COALESCE(SUM(jobs_saved), 0),
-                        COALESCE(SUM(jobs_duplicates), 0),
-                        COALESCE(SUM(jobs_archived), 0)
-                    FROM scrape_company_results
-                    WHERE run_id = %s
-                    """,
-                    (run_id,),
-                )
-                done, ok, failed, fetched, saved, dupes, archived = cur.fetchone()
+            row = _company_result_counts(conn, run_id)
+            done = int(row[0] or 0)
+            ok = int(row[1] or 0)
+            failed = int(row[2] or 0)
+            fetched = int(row[3] or 0)
+            saved = int(row[4] or 0)
+            dupes = int(row[5] or 0)
+            archived = int(row[6] or 0)
+            last_finished = row[7]
 
-            done = int(done or 0)
-            if done < queued:
+            if queued > 0 and done >= queued:
+                if _close_queue_run(
+                    conn,
+                    run_id=run_id,
+                    source_id=source_id,
+                    source_name=source_name,
+                    started_at=started_at,
+                    done=done,
+                    ok=ok,
+                    failed=failed,
+                    fetched=fetched,
+                    saved=saved,
+                    dupes=dupes,
+                    archived=archived,
+                    log_label="complete",
+                ):
+                    finalized += 1
+                conn.commit()
+                continue
+
+            if queued > 0 and done < queued:
                 logger.info(
                     "scrape_run drain source=%s run_id=%s %d/%d",
                     source_name,
@@ -554,75 +772,55 @@ def finalize_completed_queue_runs() -> int:
                     done,
                     queued,
                 )
+
+            # Stale / stuck recovery (including queued<=0 left open forever)
+            if started_at is None:
+                continue
+            try:
+                started = started_at.replace(tzinfo=None) if getattr(started_at, "tzinfo", None) else started_at
+            except Exception:  # noqa: BLE001
+                started = started_at
+            age = now - started
+            if age < stale_after:
                 continue
 
-            ok = int(ok or 0)
-            failed = int(failed or 0)
-            if failed == 0:
-                status = "success"
-            elif ok == 0:
-                status = "failed"
-            else:
-                status = "partial"
-
-            duration_ms = None
-            if started_at is not None:
-                try:
-                    duration_ms = int((datetime.utcnow() - started_at).total_seconds() * 1000)
-                except Exception:  # noqa: BLE001
-                    duration_ms = None
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE scrape_runs
-                    SET status = %s,
-                        finished_at = CURRENT_TIMESTAMP,
-                        duration_ms = %s,
-                        companies_processed = %s,
-                        companies_succeeded = %s,
-                        companies_failed = %s,
-                        total_jobs_fetched = %s,
-                        jobs_saved = %s,
-                        jobs_duplicates = %s,
-                        jobs_archived = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s AND status = 'running'
-                    """,
-                    (
-                        status,
-                        duration_ms,
-                        done,
-                        ok,
-                        failed,
-                        int(fetched or 0),
-                        int(saved or 0),
-                        int(dupes or 0),
-                        int(archived or 0),
-                        run_id,
-                    ),
+            last_progress = last_finished or started
+            try:
+                last_progress = (
+                    last_progress.replace(tzinfo=None)
+                    if getattr(last_progress, "tzinfo", None)
+                    else last_progress
                 )
-                if cur.rowcount:
-                    cur.execute(
-                        """
-                        UPDATE job_sources
-                        SET last_run_at = CURRENT_TIMESTAMP,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                        """,
-                        (source_id,),
-                    )
-                    finalized += 1
-                    logger.info(
-                        "scrape_run complete source=%s run_id=%s status=%s "
-                        "done=%d ok=%d fail=%d",
-                        source_name,
-                        run_id,
-                        status,
-                        done,
-                        ok,
-                        failed,
-                    )
+            except Exception:  # noqa: BLE001
+                pass
+            stall = now - last_progress
+            if stall < stall_for:
+                continue
+
+            meta = dict(meta)
+            meta["abandoned_stale"] = True
+            meta["abandoned_at"] = now.isoformat() + "Z"
+            meta["abandoned_reason"] = (
+                f"no progress for {stall_for}; age {age}; done={done} queued={queued}"
+            )
+            if _close_queue_run(
+                conn,
+                run_id=run_id,
+                source_id=source_id,
+                source_name=source_name,
+                started_at=started_at,
+                done=done,
+                ok=ok,
+                failed=failed,
+                fetched=fetched,
+                saved=saved,
+                dupes=dupes,
+                archived=archived,
+                notes=json.dumps(meta),
+                log_label="abandon_stale",
+                incomplete=True,
+            ):
+                finalized += 1
             conn.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("scrape_stats: finalize queue runs failed: %s", exc)
