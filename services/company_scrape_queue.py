@@ -13,7 +13,7 @@ from pydantic import BaseModel, ValidationError
 from services.company_scrape import scrape_one_company
 from services.scrape_request_service import MessageDisposition
 from sources.source_factory import create_source
-from utils.scrape_stats import ScrapeRunRecorder
+from utils.scrape_stats import ScrapeRunRecorder, record_dropped_company_task
 from utils.source_loader import get_source_config
 from workers.rabbitmq_settings import load_rabbitmq_worker_settings
 
@@ -131,6 +131,32 @@ def _source_for(source_name: str):
     return source
 
 
+def _credit_drop_from_partial(data: dict, reason: str) -> None:
+    """If enough identity fields exist, write a failed result so the run can drain."""
+    run_id = data.get("run_id")
+    source_id = data.get("source_id")
+    source_name = data.get("source_name")
+    company_id = data.get("company_id")
+    if not all(
+        isinstance(v, str) and v.strip()
+        for v in (run_id, source_id, source_name, company_id)
+    ):
+        return
+    ok = record_dropped_company_task(
+        run_id=str(run_id),
+        source_id=str(source_id),
+        source_name=str(source_name),
+        company_id=str(company_id),
+        reason=reason,
+    )
+    if not ok:
+        logger.error(
+            "company_scrape_tasks: failed to credit drop for run=%s company=%s",
+            run_id,
+            company_id,
+        )
+
+
 def process_company_scrape_body(body: bytes | str) -> MessageDisposition:
     if isinstance(body, bytes):
         try:
@@ -153,6 +179,7 @@ def process_company_scrape_body(body: bytes | str) -> MessageDisposition:
         task = CompanyScrapeTask.model_validate(data)
     except ValidationError as e:
         logger.warning("company_scrape_tasks: invalid payload: %s", e)
+        _credit_drop_from_partial(data, f"invalid payload: {e}")
         return MessageDisposition.NACK_NO_REQUEUE
 
     source = _source_for(task.source_name)
@@ -185,5 +212,13 @@ def process_company_scrape_body(body: bytes | str) -> MessageDisposition:
             cr.mark_failure(outcome.error, fetched=outcome.jobs_fetched)
         else:
             cr.mark_failure(RuntimeError("scrape failed"), fetched=outcome.jobs_fetched)
+
+    if not cr.persisted:
+        logger.error(
+            "company_scrape_tasks: result not persisted run=%s company=%s — requeue",
+            task.run_id,
+            task.company_id,
+        )
+        return MessageDisposition.NACK_REQUEUE
 
     return MessageDisposition.ACK
