@@ -279,5 +279,7 @@ def save_jobs(
             saved_count += 1
         else:
             duplicate_count += 1
+        # Descriptions dominate per-job RSS; drop after persist/skill extract.
+        job.job_description = None
 
     return saved_count, duplicate_count

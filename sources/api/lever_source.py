@@ -37,6 +37,7 @@ class LeverSource(BaseSource):
 
             # Lever returns a top-level JSON array, not a dict with a nested key.
             postings = response.json()
+            response.close()
             if not isinstance(postings, list):
                 logger.warning(
                     f"Unexpected Lever response shape for {company_name}: "
@@ -53,6 +54,7 @@ class LeverSource(BaseSource):
                 except Exception as e:
                     logger.warning(f"Error parsing Lever job from {company_name}: {e}")
                     continue
+            del postings
 
             jobs_with_desc = sum(1 for j in jobs if j.job_description)
             logger.info(

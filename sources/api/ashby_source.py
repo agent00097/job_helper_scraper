@@ -36,8 +36,11 @@ class AshbySource(BaseSource):
             response.raise_for_status()
 
             data = response.json()
+            response.close()
+            raw_jobs = data.get("jobs", []) or []
+            del data
             jobs = []
-            for job_data in data.get("jobs", []):
+            for job_data in raw_jobs:
                 try:
                     job = self._parse_job(job_data, company_name, company_endpoint)
                     if job:
@@ -45,6 +48,7 @@ class AshbySource(BaseSource):
                 except Exception as e:
                     logger.warning(f"Error parsing Ashby job from {company_name}: {e}")
                     continue
+            del raw_jobs
 
             jobs_with_desc = sum(1 for j in jobs if j.job_description)
             logger.info(

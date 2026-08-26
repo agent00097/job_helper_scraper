@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import struct
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 from uuid import UUID
+
+import numpy as np
 
 from utils.skills.alias_matcher import derived_aliases_for_name
 from utils.skills.catalog import SkillCatalog, SkillRecord
@@ -25,6 +27,9 @@ _BATCH_SIZE = 100
 
 EmbedFn = Callable[[list[str], str], list[list[float]]]
 
+_openai_lock = threading.Lock()
+_openai_client = None
+
 
 @dataclass(frozen=True)
 class EmbeddingHit:
@@ -36,7 +41,11 @@ class EmbeddingHit:
     phrase_source: str = ""
 
 
-def _default_embed(texts: list[str], model: str) -> list[list[float]]:
+def _openai_embed_client():
+    """Reuse one OpenAI client (and its HTTP pool) per process."""
+    global _openai_client
+    if _openai_client is not None:
+        return _openai_client
     from openai import OpenAI
 
     api_key = (
@@ -48,7 +57,14 @@ def _default_embed(texts: list[str], model: str) -> list[list[float]]:
         raise RuntimeError(
             "OPENAI_API_KEY (or SKILL_EMBEDDING_API_KEY) is required for embeddings"
         )
-    client = OpenAI(api_key=api_key)
+    with _openai_lock:
+        if _openai_client is None:
+            _openai_client = OpenAI(api_key=api_key)
+        return _openai_client
+
+
+def _default_embed(texts: list[str], model: str) -> list[list[float]]:
+    client = _openai_embed_client()
     resp = client.embeddings.create(model=model, input=texts)
     ordered = sorted(resp.data, key=lambda d: d.index)
     return [list(d.embedding) for d in ordered]
@@ -57,16 +73,13 @@ def _default_embed(texts: list[str], model: str) -> list[list[float]]:
 def cosine(a: Sequence[float], b: Sequence[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
+    va = np.asarray(a, dtype=np.float32)
+    vb = np.asarray(b, dtype=np.float32)
+    na = float(np.linalg.norm(va))
+    nb = float(np.linalg.norm(vb))
     if na <= 0.0 or nb <= 0.0:
         return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
+    return float(np.dot(va, vb) / (na * nb))
 
 
 def skill_embed_text(skill: SkillRecord) -> str:
@@ -92,26 +105,59 @@ def skill_embed_text(skill: SkillRecord) -> str:
     return " | ".join(uniq)
 
 
+def _as_float32_matrix(vectors: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
+    """Pack embeddings into one C-contiguous float32 array (not Python floats)."""
+    matrix = np.asarray(vectors, dtype=np.float32)
+    if matrix.size == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(1, -1)
+    if matrix.ndim != 2:
+        raise ValueError(f"embedding matrix must be 2-D, got shape {matrix.shape}")
+    return np.ascontiguousarray(matrix, dtype=np.float32)
+
+
 class SkillEmbeddingIndex:
-    """In-memory skill embedding matrix with on-disk cache."""
+    """In-memory skill embedding matrix with on-disk cache.
+
+    Vectors are stored as one float32 ndarray (L2-normalized after load/build)
+    instead of `list[list[float]]`. For text-embedding-3-small (1536-d) that
+    is ~4 bytes/dim versus ~28 bytes per Python float, plus list pointer
+    overhead — typically a 5–8× RSS drop for the index.
+    """
 
     def __init__(
         self,
         skill_ids: list[UUID],
         names: list[str],
-        vectors: list[list[float]],
+        vectors: Sequence[Sequence[float]] | np.ndarray,
         model: str,
         *,
         version: int = _CACHE_VERSION,
+        normalize: bool = True,
     ):
-        if not (len(skill_ids) == len(names) == len(vectors)):
+        matrix = _as_float32_matrix(vectors)
+        if not (len(skill_ids) == len(names) == matrix.shape[0]):
             raise ValueError("skill_ids, names, vectors length mismatch")
         self.skill_ids = skill_ids
         self.names = names
-        self.vectors = vectors
         self.model = model
         self.version = version
-        self._norms = [math.sqrt(sum(x * x for x in v)) or 1.0 for v in vectors]
+        self._matrix = matrix
+        if normalize and self._matrix.size:
+            self._normalize_inplace()
+
+    @property
+    def vectors(self) -> np.ndarray:
+        return self._matrix
+
+    def _normalize_inplace(self) -> None:
+        """L2-normalize rows so cosine similarity is a matrix multiply."""
+        if self._matrix.size == 0:
+            return
+        norms = np.linalg.norm(self._matrix, axis=1, keepdims=True)
+        np.maximum(norms, 1e-12, out=norms)
+        self._matrix /= norms
 
     @classmethod
     def build(
@@ -135,16 +181,17 @@ class SkillEmbeddingIndex:
                 and len(cached.skill_ids) == len(catalog.skills)
             ):
                 logger.info(
-                    "Loaded skill embedding cache v%s (%d vectors) from %s",
+                    "Loaded skill embedding cache v%s (%d vectors, %.1f MiB) from %s",
                     cached.version,
                     len(cached.skill_ids),
+                    cached._matrix.nbytes / (1024 * 1024),
                     cache_path,
                 )
                 return cached
 
         skills = sorted(catalog.skills.values(), key=lambda s: s.normalized_name)
         texts = [skill_embed_text(s) for s in skills]
-        vectors: list[list[float]] = []
+        rows: list[np.ndarray] = []
         logger.info(
             "Embedding %d enriched skills with %s (cache v%s) ...",
             len(texts),
@@ -153,25 +200,41 @@ class SkillEmbeddingIndex:
         )
         for i in range(0, len(texts), _BATCH_SIZE):
             batch = texts[i : i + _BATCH_SIZE]
-            vectors.extend(embed_fn(batch, model))
+            batch_vecs = embed_fn(batch, model)
+            rows.append(_as_float32_matrix(batch_vecs))
             logger.info(
                 "  embedded %d / %d", min(i + _BATCH_SIZE, len(texts)), len(texts)
             )
             time.sleep(0.05)
 
+        if rows:
+            matrix = np.vstack(rows)
+        else:
+            matrix = np.zeros((0, 0), dtype=np.float32)
+        del rows, texts
+
+        # Persist original (unnormalized) vectors so the on-disk format stays
+        # compatible with other services that share skill_embeddings.bin.
         index = cls(
             skill_ids=[s.skill_id for s in skills],
             names=[s.name for s in skills],
-            vectors=vectors,
+            vectors=matrix,
             model=model,
             version=_CACHE_VERSION,
+            normalize=False,
         )
         index.save(cache_path)
+        index._normalize_inplace()
+        logger.info(
+            "Skill embedding index ready (%d vectors, %.1f MiB float32)",
+            len(index.skill_ids),
+            index._matrix.nbytes / (1024 * 1024),
+        )
         return index
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        dim = len(self.vectors[0]) if self.vectors else 0
+        dim = int(self._matrix.shape[1]) if self._matrix.size else 0
         meta = {
             "version": self.version,
             "model": self.model,
@@ -181,11 +244,11 @@ class SkillEmbeddingIndex:
             "names": self.names,
         }
         header = json.dumps(meta).encode("utf-8")
+        payload = np.ascontiguousarray(self._matrix, dtype="<f4")
         with path.open("wb") as f:
             f.write(struct.pack("<I", len(header)))
             f.write(header)
-            for vec in self.vectors:
-                f.write(struct.pack(f"<{dim}f", *vec))
+            f.write(payload.tobytes())
         logger.info("Wrote skill embedding cache to %s", path)
 
     @classmethod
@@ -198,14 +261,21 @@ class SkillEmbeddingIndex:
                 meta = json.loads(f.read(hlen).decode("utf-8"))
                 dim = int(meta["dim"])
                 count = int(meta["count"])
-                vectors: list[list[float]] = []
-                for _ in range(count):
-                    raw = f.read(4 * dim)
-                    vectors.append(list(struct.unpack(f"<{dim}f", raw)))
+                expected = count * dim * 4
+                raw = f.read(expected)
+            if dim <= 0 or count <= 0:
+                matrix = np.zeros((count, max(dim, 0)), dtype=np.float32)
+            else:
+                if len(raw) != expected:
+                    raise ValueError(
+                        f"embedding payload size {len(raw)} != expected {expected}"
+                    )
+                matrix = np.frombuffer(raw, dtype="<f4").reshape(count, dim).copy()
+            del raw
             return cls(
                 skill_ids=[UUID(s) for s in meta["skill_ids"]],
                 names=list(meta["names"]),
-                vectors=vectors,
+                vectors=matrix,
                 model=meta["model"],
                 version=int(meta.get("version", 1)),
             )
@@ -235,41 +305,47 @@ class SkillEmbeddingIndex:
             text = (text or "").strip()
             if text:
                 parsed.append((text[:200], source))
-        if not parsed or not self.vectors:
+        if not parsed or self._matrix.size == 0:
             return []
 
         embed_fn = embed_fn or _default_embed
         exclude = exclude or set()
         texts = [t for t, _ in parsed]
-        vectors = embed_fn(texts, self.model)
+        query = _as_float32_matrix(embed_fn(texts, self.model))
+        q_norms = np.linalg.norm(query, axis=1, keepdims=True)
+        np.maximum(q_norms, 1e-12, out=q_norms)
+        query /= q_norms
+        # (n_phrases, n_skills) — float32 matmul, no per-skill Python loop
+        sims = query @ self._matrix.T
 
-        # skill_id -> best hit
+        if exclude:
+            mask = np.fromiter(
+                (sid in exclude for sid in self.skill_ids),
+                dtype=bool,
+                count=len(self.skill_ids),
+            )
+            sims[:, mask] = -1.0
+
+        n_skills = sims.shape[1]
+        k = max(1, min(int(top_k_per_phrase), n_skills))
         best: dict[UUID, EmbeddingHit] = {}
-        for (phrase, source), q in zip(parsed, vectors):
-            qn = math.sqrt(sum(x * x for x in q)) or 1.0
-            scored: list[tuple[float, int]] = []
-            for i, vec in enumerate(self.vectors):
-                sid = self.skill_ids[i]
-                if sid in exclude:
+        for qi, (phrase, source) in enumerate(parsed):
+            row = sims[qi]
+            top_idx = np.argpartition(row, -k)[-k:]
+            top_idx = top_idx[np.argsort(row[top_idx])[::-1]]
+            for i in top_idx:
+                sim = float(row[i])
+                if sim < min_cosine:
                     continue
-                dot = 0.0
-                for a, b in zip(q, vec):
-                    dot += a * b
-                sim = dot / (qn * self._norms[i])
-                if sim >= min_cosine:
-                    scored.append((sim, i))
-            scored.sort(reverse=True)
-            for sim, i in scored[:top_k_per_phrase]:
-                sid = self.skill_ids[i]
+                sid = self.skill_ids[int(i)]
                 weight = 0.45 + 0.40 * min(
                     1.0, (sim - min_cosine) / max(1e-6, 1.0 - min_cosine)
                 )
-                # Slight boost when phrase came from requirements.
                 if source == "requirements":
                     weight = min(0.88, weight + 0.05)
                 hit = EmbeddingHit(
                     skill_id=sid,
-                    skill_name=self.names[i],
+                    skill_name=self.names[int(i)],
                     cosine=sim,
                     weight=round(weight, 4),
                     phrase=phrase,

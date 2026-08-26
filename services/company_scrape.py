@@ -142,6 +142,7 @@ def _scrape_one_company_impl(
             logger.info("%s/%s: no jobs found", source.name, company_name)
 
         update_company_last_fetched(company_id)
+        jobs.clear()
         return CompanyScrapeOutcome(
             ok=True,
             jobs_fetched=fetched_count,

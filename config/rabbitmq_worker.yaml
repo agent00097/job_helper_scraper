@@ -5,7 +5,8 @@
 # RABBITMQ_HOST, so this file’s host is mainly for local runs or other environments.
 # Local + port-forward: use RABBITMQ_HOST=127.0.0.1 (or set host: 127.0.0.1 here).
 #
-# Optional env overrides: RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_VHOST, RABBITMQ_QUEUE.
+# Optional env overrides: RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_VHOST, RABBITMQ_QUEUE,
+# RABBITMQ_PREFETCH (company workers set this to 1 so only one board is in flight).
 # Override file path: RABBITMQ_WORKER_CONFIG=/path/to/custom.yaml
 
 host: rabbitmq-0.rabbitmq-headless.infra.svc.cluster.local

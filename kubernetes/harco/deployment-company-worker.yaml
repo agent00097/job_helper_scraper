@@ -42,6 +42,9 @@ spec:
               value: "company_scrape_tasks"
             - name: COMPANY_SCRAPE_QUEUE
               value: "company_scrape_tasks"
+            # One in-flight company board at a time (boards + embeddings are heavy).
+            - name: RABBITMQ_PREFETCH
+              value: "1"
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:

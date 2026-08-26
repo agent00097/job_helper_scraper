@@ -98,6 +98,7 @@ class WorkdaySource(BaseSource):
             except Exception as e:
                 logger.warning("Error parsing Workday job from %s: %s", company_name, e)
                 continue
+        del postings
 
         already_described = urls_with_existing_description(
             str(job.url) for _, job in list_parsed
@@ -138,6 +139,7 @@ class WorkdaySource(BaseSource):
             jobs_with_desc,
             len(jobs) - jobs_with_desc,
         )
+        del list_parsed
         return jobs
 
     def _fetch_all_postings(self, api_base: str, company_name: str) -> List[Dict]:

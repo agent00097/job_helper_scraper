@@ -60,13 +60,15 @@ def load_rabbitmq_worker_settings() -> RabbitMQWorkerSettings:
     vhost = os.environ.get("RABBITMQ_VHOST") or str(req("virtual_host"))
     queue_s = os.environ.get("RABBITMQ_QUEUE")
     queue_name = queue_s if queue_s else str(req("queue_name"))
+    prefetch_s = os.environ.get("RABBITMQ_PREFETCH")
+    prefetch_count = int(prefetch_s) if prefetch_s else int(req("prefetch_count"))
 
     return RabbitMQWorkerSettings(
         host=host,
         port=port,
         virtual_host=vhost,
         queue_name=queue_name,
-        prefetch_count=int(req("prefetch_count")),
+        prefetch_count=prefetch_count,
         reconnect_delay_seconds=float(req("reconnect_delay_seconds")),
         requeue_on_failure=bool(req("requeue_on_failure")),
         username=username,

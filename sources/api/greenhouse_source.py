@@ -114,9 +114,12 @@ class GreenhouseSource(BaseSource):
             response.raise_for_status()
             
             jobs_data = response.json()
+            response.close()
+            raw_jobs = jobs_data.get("jobs", []) or []
+            del jobs_data
             jobs: List[JobData] = []
             
-            for job_data in jobs_data.get("jobs", []):
+            for job_data in raw_jobs:
                 try:
                     job = self._parse_job(job_data, company_name, company_endpoint)
                     if job:
@@ -124,6 +127,7 @@ class GreenhouseSource(BaseSource):
                 except Exception as e:
                     logger.warning(f"Error parsing job from {company_name}: {e}")
                     continue
+            del raw_jobs
 
             already_described = urls_with_existing_description(str(j.url) for j in jobs)
             detail_fetched = 0
@@ -287,6 +291,7 @@ class GreenhouseSource(BaseSource):
             response.raise_for_status()
             
             job_detail = response.json()
+            response.close()
             content = job_detail.get("content")
             
             if content:
