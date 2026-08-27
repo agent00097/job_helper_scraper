@@ -12,7 +12,7 @@ host: rabbitmq-0.rabbitmq-headless.infra.svc.cluster.local
 port: 5672
 virtual_host: "jobs"
 queue_name: job_scrape_requests
-prefetch_count: 2
+prefetch_count: 1
 reconnect_delay_seconds: 5
 requeue_on_failure: true
 username: job_worker

@@ -90,6 +90,11 @@ def classify_exception(exc: BaseException) -> tuple[str, Optional[int]]:
     module = (getattr(type(exc), "__module__", "") or "").lower()
     name = type(exc).__name__.lower()
 
+    # Storage before generic "timeout" matching: psycopg.ConnectionTimeout
+    # would otherwise land in the network bucket.
+    if module.startswith(("psycopg", "sqlalchemy")) or "database" in name or "operationalerror" in name:
+        return ErrorBucket.STORAGE, status
+
     # Network / transport errors
     network_hints = (
         "timeout",
@@ -124,10 +129,6 @@ def classify_exception(exc: BaseException) -> tuple[str, Optional[int]]:
     )
     if any(hint in name for hint in parse_hints):
         return ErrorBucket.PARSE, status
-
-    # Storage errors (Postgres / psycopg / disk)
-    if module.startswith(("psycopg", "sqlalchemy")) or "database" in name or "operationalerror" in name:
-        return ErrorBucket.STORAGE, status
 
     return ErrorBucket.UNKNOWN, status
 

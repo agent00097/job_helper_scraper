@@ -37,8 +37,8 @@ class RabbitMQJobWorker:
             port=self.settings.port,
             virtual_host=self.settings.virtual_host,
             credentials=pika.PlainCredentials(self.settings.username, self.settings.password),
-            heartbeat=60,
-            blocked_connection_timeout=300,
+            heartbeat=self.settings.heartbeat,
+            blocked_connection_timeout=self.settings.blocked_connection_timeout,
         )
 
     def _on_message(

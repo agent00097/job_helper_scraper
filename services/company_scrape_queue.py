@@ -55,8 +55,8 @@ def publish_company_scrape_tasks(
         port=settings.port,
         virtual_host=settings.virtual_host,
         credentials=pika.PlainCredentials(settings.username, settings.password),
-        heartbeat=60,
-        blocked_connection_timeout=300,
+        heartbeat=settings.heartbeat,
+        blocked_connection_timeout=settings.blocked_connection_timeout,
     )
     published = 0
     connection = None

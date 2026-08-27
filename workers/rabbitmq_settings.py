@@ -21,6 +21,8 @@ class RabbitMQWorkerSettings:
     requeue_on_failure: bool
     username: str
     password: str
+    heartbeat: int
+    blocked_connection_timeout: int
 
 
 def _config_path() -> Path:
@@ -61,14 +63,23 @@ def load_rabbitmq_worker_settings() -> RabbitMQWorkerSettings:
     queue_s = os.environ.get("RABBITMQ_QUEUE")
     queue_name = queue_s if queue_s else str(req("queue_name"))
 
+    prefetch_s = os.environ.get("RABBITMQ_PREFETCH")
+    prefetch_count = int(prefetch_s) if prefetch_s else int(req("prefetch_count"))
+    heartbeat_s = os.environ.get("RABBITMQ_HEARTBEAT")
+    heartbeat = int(heartbeat_s) if heartbeat_s else 300
+    blocked_s = os.environ.get("RABBITMQ_BLOCKED_CONNECTION_TIMEOUT")
+    blocked_connection_timeout = int(blocked_s) if blocked_s else 300
+
     return RabbitMQWorkerSettings(
         host=host,
         port=port,
         virtual_host=vhost,
         queue_name=queue_name,
-        prefetch_count=int(req("prefetch_count")),
+        prefetch_count=prefetch_count,
         reconnect_delay_seconds=float(req("reconnect_delay_seconds")),
         requeue_on_failure=bool(req("requeue_on_failure")),
         username=username,
         password=password,
+        heartbeat=heartbeat,
+        blocked_connection_timeout=blocked_connection_timeout,
     )
