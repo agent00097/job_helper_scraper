@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 
 # ATS sources whose companies are dispatched to company_scrape_tasks.
 # JobBank is a site-wide incremental crawl, not a per-company board list.
-QUEUE_DISPATCH_SOURCES = frozenset({"ashby", "greenhouse", "lever", "workday"})
+QUEUE_DISPATCH_SOURCES = frozenset(
+    {"ashby", "greenhouse", "lever", "workday", "smartrecruiters"}
+)
 
 
 def uses_company_scrape_queue(source_name: str) -> bool:

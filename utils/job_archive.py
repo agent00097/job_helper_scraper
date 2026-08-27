@@ -16,7 +16,9 @@ import db
 logger = logging.getLogger(__name__)
 
 # Sources that return a full current board per company (not incremental).
-PRESENCE_RECONCILE_SOURCES = frozenset({"greenhouse", "ashby", "lever", "workday"})
+PRESENCE_RECONCILE_SOURCES = frozenset(
+    {"greenhouse", "ashby", "lever", "workday", "smartrecruiters"}
+)
 
 _CLOSED_STATUS = "removed"
 

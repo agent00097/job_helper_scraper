@@ -13,6 +13,7 @@ def test_board_urls():
     assert _board_url("ashby", "acme") == "https://jobs.ashbyhq.com/acme"
     assert _board_url("lever", "acme") == "https://jobs.lever.co/acme"
     assert _board_url("greenhouse", "acme") == "https://boards.greenhouse.io/acme"
+    assert _board_url("smartrecruiters", "Visa") == "https://jobs.smartrecruiters.com/Visa"
     workday = "https://acme.wd1.myworkdayjobs.com/Careers"
     assert _board_url("workday", workday) == workday
     assert _board_url("unknown", "acme") is None

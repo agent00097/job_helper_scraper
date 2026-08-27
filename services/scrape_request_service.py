@@ -15,6 +15,7 @@ from pydantic import BaseModel, HttpUrl, ValidationError
 from sources.api.ashby_source import AshbySource
 from sources.api.greenhouse_source import GreenhouseSource
 from sources.api.lever_source import LeverSource
+from sources.api.smartrecruiters_source import SmartRecruitersSource
 from sources.api.workday_source import WorkdaySource
 from sources.source_factory import create_source
 from utils.company_discovery import parse_company_from_url, source_name_for_url
@@ -81,6 +82,7 @@ def try_enrich_by_url(job: JobData) -> JobData:
       jobs.ashbyhq.com                                 -> Ashby
       jobs.lever.co                                    -> Lever
       *.myworkdayjobs.com                              -> Workday
+      jobs.smartrecruiters.com / careers.smartrecruiters.com -> SmartRecruiters
 
     Falls back to the original job unchanged if the URL doesn't match a known
     source, the source is disabled/unconfigured, or the API call fails.
@@ -101,7 +103,9 @@ def try_enrich_by_url(job: JobData) -> JobData:
     try:
         if isinstance(source, GreenhouseSource):
             enriched = source.fetch_job_by_board_page_url(url_str)
-        elif isinstance(source, (AshbySource, LeverSource, WorkdaySource)):
+        elif isinstance(
+            source, (AshbySource, LeverSource, WorkdaySource, SmartRecruitersSource)
+        ):
             enriched = source.fetch_job_by_url(url_str)
         else:
             logger.warning("Source %s has no URL-based enrichment method", type(source).__name__)

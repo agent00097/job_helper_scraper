@@ -7,6 +7,7 @@ from sources.base_source import BaseSource
 from sources.api.ashby_source import AshbySource
 from sources.api.greenhouse_source import GreenhouseSource
 from sources.api.lever_source import LeverSource
+from sources.api.smartrecruiters_source import SmartRecruitersSource
 from sources.api.workday_source import WorkdaySource
 from sources.scraper.jobbank_source import JobBankSource
 
@@ -53,6 +54,13 @@ def create_source(source_config: dict) -> Optional[BaseSource]:
             )
         elif source_name == "workday":
             return WorkdaySource(
+                name=source_name,
+                source_id=source_id,
+                config=config,
+                rate_limit_per_minute=rate_limit,
+            )
+        elif source_name == "smartrecruiters":
+            return SmartRecruitersSource(
                 name=source_name,
                 source_id=source_id,
                 config=config,

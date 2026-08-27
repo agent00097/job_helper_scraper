@@ -104,6 +104,25 @@ URL_CASES = [
         },
     ),
     (
+        "SmartRecruiters jobs.smartrecruiters.com — Visa",
+        "https://jobs.smartrecruiters.com/Visa/743999999-software-engineer",
+        {"source": "smartrecruiters", "company_endpoint": "Visa", "company_name": "Visa"},
+    ),
+    (
+        "SmartRecruiters careers.smartrecruiters.com — IKEA",
+        "https://careers.smartrecruiters.com/IKEA/abc",
+        {"source": "smartrecruiters", "company_endpoint": "IKEA", "company_name": "Ikea"},
+    ),
+    (
+        "SmartRecruiters api.smartrecruiters.com — smartrecruiters",
+        "https://api.smartrecruiters.com/v1/companies/smartrecruiters/postings/74983486",
+        {
+            "source": "smartrecruiters",
+            "company_endpoint": "smartrecruiters",
+            "company_name": "Smartrecruiters",
+        },
+    ),
+    (
         "Unknown → None",
         "https://example.com/job/123",
         None,

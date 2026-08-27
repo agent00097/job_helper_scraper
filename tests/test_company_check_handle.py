@@ -44,6 +44,9 @@ class TestCompanyHandle:
     def test_bare_greenhouse_slug_passthrough(self):
         assert _company_handle("greenhouse", "anthropic") == "anthropic"
 
+    def test_bare_smartrecruiters_slug_passthrough(self):
+        assert _company_handle("smartrecruiters", "Visa") == "Visa"
+
     def test_workday_malformed_url_falls_through(self):
         # urlparse("not-a-url").hostname is None → parts[0] is "" → falls through
         assert _company_handle("workday", "not-a-url") == "not-a-url"

@@ -27,6 +27,12 @@ def source_name_for_url(url: str) -> str | None:
         return "lever"
     if hostname.endswith(".myworkdayjobs.com"):
         return "workday"
+    if hostname in (
+        "jobs.smartrecruiters.com",
+        "careers.smartrecruiters.com",
+        "api.smartrecruiters.com",
+    ):
+        return "smartrecruiters"
     return None
 
 
@@ -34,7 +40,7 @@ def parse_company_from_url(url: str) -> dict | None:
     """Parse a job posting URL into source metadata.
 
     Returns a dict with keys:
-      "source"           — one of "ashby", "lever", "greenhouse", "workday"
+      "source"           — one of "ashby", "lever", "greenhouse", "workday", "smartrecruiters"
       "company_endpoint" — the value stored in source_companies.company_endpoint
       "company_name"     — human-readable name derived from the URL slug
 
@@ -61,6 +67,13 @@ def parse_company_from_url(url: str) -> dict | None:
       https://{tenant}.{dc}.myworkdayjobs.com/{site}/job/...
         → company_endpoint = "https://{tenant}.{dc}.myworkdayjobs.com/{site}"
         → company_name     = "{tenant}" title-cased
+
+    SmartRecruiters:
+      https://jobs.smartrecruiters.com/{company}/...
+      https://careers.smartrecruiters.com/{company}/...
+        → company_endpoint = "{company}"  (case preserved)
+      https://api.smartrecruiters.com/v1/companies/{company}/postings/{id}
+        → company_endpoint = "{company}"
     """
     if not url:
         return None
@@ -116,6 +129,9 @@ def parse_company_from_url(url: str) -> dict | None:
     if source == "workday":
         return _parse_workday(parsed)
 
+    if source == "smartrecruiters":
+        return _parse_smartrecruiters(parsed, path)
+
     return None  # unreachable, but satisfies type checkers
 
 
@@ -141,4 +157,37 @@ def _parse_workday(parsed) -> dict | None:
         "source": "workday",
         "company_endpoint": company_endpoint,
         "company_name": tenant.replace("-", " ").title(),
+    }
+
+
+_SR_NOISE_SEGMENTS = frozenset({"external-referrals", "oneclick", "widget", "api", "www"})
+
+
+def _parse_smartrecruiters(parsed, path: str) -> dict | None:
+    """Extract the case-sensitive company identifier from an SR URL."""
+    hostname = (parsed.hostname or "").lower()
+    parts = [p for p in path.split("/") if p]
+    company = ""
+
+    if hostname == "api.smartrecruiters.com":
+        # Path: v1/companies/{company}/postings/{id}
+        try:
+            idx = parts.index("companies")
+            company = parts[idx + 1]
+        except (ValueError, IndexError):
+            company = ""
+    elif parts and parts[0] == "external-referrals":
+        try:
+            company = parts[parts.index("company") + 1]
+        except (ValueError, IndexError):
+            company = ""
+    elif parts and parts[0] not in _SR_NOISE_SEGMENTS:
+        company = parts[0]
+
+    if not company:
+        return None
+    return {
+        "source": "smartrecruiters",
+        "company_endpoint": company,
+        "company_name": company.replace("-", " ").title(),
     }

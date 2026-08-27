@@ -34,7 +34,7 @@ _MOCK_CONFIGS = {
         "rate_limit_per_minute": 60,
         "config": {},
     }
-    for name in ("greenhouse", "ashby", "lever", "workday")
+    for name in ("greenhouse", "ashby", "lever", "workday", "smartrecruiters")
 }
 
 srs.get_source_config = lambda name: _MOCK_CONFIGS.get(name)
@@ -90,6 +90,28 @@ def _fetch_live_ashby_url(company: str = "linear") -> str | None:
         return None
 
 
+def _fetch_live_smartrecruiters_url(company: str = "smartrecruiters") -> str | None:
+    """Return the first live job URL from a SmartRecruiters board (one list GET)."""
+    try:
+        resp = requests.get(
+            f"https://api.smartrecruiters.com/v1/companies/{company}/postings",
+            params={"limit": 1, "offset": 0},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        jobs = resp.json().get("content") or []
+        if not jobs:
+            print(f"    SmartRecruiters board for {company!r} returned no jobs")
+            return None
+        job_id = jobs[0]["id"]
+        url = f"https://jobs.smartrecruiters.com/{company}/{job_id}"
+        print(f"    live URL: {url}")
+        return url
+    except Exception as e:
+        print(f"    SmartRecruiters board fetch failed: {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Routing helper (mirrors the logic inside try_enrich_by_url).
 # ---------------------------------------------------------------------------
@@ -104,6 +126,12 @@ def _expected_source(url: str) -> str | None:
         return "lever"
     if hostname.endswith(".myworkdayjobs.com"):
         return "workday"
+    if hostname in (
+        "jobs.smartrecruiters.com",
+        "careers.smartrecruiters.com",
+        "api.smartrecruiters.com",
+    ):
+        return "smartrecruiters"
     return None
 
 
@@ -121,6 +149,8 @@ def main():
     gh_url = _fetch_live_greenhouse_url()
     print("  Ashby (linear board):")
     ashby_url = _fetch_live_ashby_url()
+    print("  SmartRecruiters (smartrecruiters board):")
+    sr_url = _fetch_live_smartrecruiters_url()
 
     test_cases = [
         ("Greenhouse", gh_url),
@@ -128,6 +158,7 @@ def main():
         # Lever and Workday URLs provided directly — these are real postings.
         ("Lever",   "https://jobs.lever.co/spotify/1ff4a4e3-897c-4eab-9ee2-aa7d1d07a9d6"),
         ("Workday", "https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/Illinois---Chicago/Success-Architect---Service-Cloud_JR343225"),
+        ("SmartRecruiters", sr_url),
         ("Unknown", "https://example.com/job/123"),
     ]
 

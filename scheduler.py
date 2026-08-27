@@ -31,7 +31,7 @@ class Scheduler:
 
     def load_sources(self) -> List[dict]:
         sources: list = []
-        for name in ("greenhouse", "jobbank", "ashby", "lever", "workday"):
+        for name in ("greenhouse", "jobbank", "ashby", "lever", "workday", "smartrecruiters"):
             cfg = get_source_config(name)
             if cfg and cfg.get("enabled"):
                 sources.append(cfg)
