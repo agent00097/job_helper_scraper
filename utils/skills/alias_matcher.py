@@ -170,27 +170,68 @@ _ALLOWED_SHORT = frozenset(
         "git",
         "ci",
         "cd",
+        "k8s",
+        "dbt",
+        "gql",
     }
 )
 
-# Manual high-value short forms (small set; prefer auto-derived + embeddings).
+# Manual JD short forms. Keys resolve against catalog name, "X software",
+# or an existing alias (see resolve_catalog_skill_id). Keep in sync with
+# job_matcher/app/skills/alias_matcher.py.
 _EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
-    "salesforce software": ("salesforce",),
+    "salesforce software": ("salesforce", "sfdc", "sales force"),
+    "salesforce": ("sfdc", "sales force"),
     "kubernetes": ("k8s",),
-    "docker": ("docker compose",),
+    "docker": ("docker compose", "dockerfile"),
     "go": ("golang", "go lang", "go programming"),
     "node.js": ("nodejs", "node js"),
     "amazon web services aws software": ("aws", "amazon web services"),
+    "amazon web services": ("aws",),
     "microsoft azure software": ("azure", "microsoft azure"),
-    "google cloud software": ("google cloud", "gcp", "google cloud platform"),
-    "react": ("react.js", "reactjs"),
-    "postgresql": ("postgres",),
-    "mongodb": ("mongo",),
-    "c++": ("cpp", "c plus plus"),
+    "azure": ("microsoft azure",),
+    "google cloud software": ("google cloud", "gcp", "google cloud platform", "gcloud"),
+    "google cloud": ("gcp", "google cloud platform", "gcloud"),
+    "react": ("react.js", "reactjs", "react js"),
+    "react native": ("react-native", "reactnative"),
+    "postgresql": ("postgres", "psql"),
+    "mongodb": ("mongo", "mongo db"),
+    "c++": ("cpp", "c plus plus", "cplusplus"),
+    "c#": ("csharp", "c sharp", "c-sharp"),
     "python": ("python3", "python 3"),
     "structured query language sql": ("sql",),
     "atlassian jira": ("jira",),
+    "jira": ("atlassian jira",),
     "mulesoft software": ("mulesoft", "mule soft"),
+    "mulesoft": ("mule soft",),
+    "typescript": ("type script",),
+    "next.js": ("nextjs", "next js"),
+    "vue.js": ("vuejs", "vue js"),
+    "angular": ("angularjs", "angular.js"),
+    "graphql": ("graph ql", "gql"),
+    "terraform": ("hashicorp terraform",),
+    "fastapi": ("fast api",),
+    "django": ("django rest framework",),
+    "ruby on rails": ("rails",),
+    "spring boot": ("springboot", "spring-boot"),
+    "pytorch": ("py torch",),
+    "tensorflow": ("tensor flow",),
+    "scikit-learn": ("sklearn", "scikit learn"),
+    "apache kafka": ("kafka",),
+    "kafka": ("apache kafka",),
+    "redis": ("redis cache",),
+    "elasticsearch": ("elastic search", "opensearch"),
+    "snowflake": ("snowflake db",),
+    "databricks": ("data bricks",),
+    "dbt": ("dbt core", "data build tool"),
+    "apache airflow": ("airflow",),
+    "airflow": ("apache airflow",),
+    "apache spark": ("pyspark", "py spark"),
+    "power bi": ("powerbi", "microsoft power bi"),
+    "github actions": ("gh actions",),
+    "langchain": ("lang chain",),
+    "hugging face": ("huggingface",),
+    "tailwind css": ("tailwind", "tailwindcss"),
 }
 
 _TITLE_WEIGHT = 1.0
@@ -228,6 +269,31 @@ def _alias_allowed(normalized_alias: str) -> bool:
     if " " not in normalized_alias and normalized_alias in _GENERIC_ALIASES:
         return False
     return True
+
+
+def resolve_catalog_skill_id(
+    key: str,
+    by_norm_name: dict[str, UUID],
+    alias_map: dict[str, tuple[UUID, str]],
+) -> Optional[UUID]:
+    """
+    Map an extra-alias key onto a catalog skill.
+
+    Tries exact normalized name, "X software" (O*NET workplace examples),
+    then an already-loaded alias.
+    """
+    norm = (key or "").strip().lower()
+    if not norm:
+        return None
+    if norm in by_norm_name:
+        return by_norm_name[norm]
+    software = f"{norm} software"
+    if software in by_norm_name:
+        return by_norm_name[software]
+    hit = alias_map.get(norm)
+    if hit:
+        return hit[0]
+    return None
 
 
 def derived_aliases_for_name(name: str) -> list[str]:
@@ -315,12 +381,11 @@ class AliasMatcher:
 
         alias_map: dict[str, tuple[UUID, str]] = dict(catalog.aliases)
 
-        # Manual extras.
+        # Manual extras. Keys often omit the O*NET " software" suffix.
         for skill_norm, extras in _EXTRA_ALIASES.items():
-            skill_id = by_norm_name.get(skill_norm)
+            skill_id = resolve_catalog_skill_id(skill_norm, by_norm_name, alias_map)
             if skill_id is None:
                 continue
-            skill = catalog.get(skill_id)
             for extra in extras:
                 key = extra.strip().lower()
                 if key and key not in alias_map:

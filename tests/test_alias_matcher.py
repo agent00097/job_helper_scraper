@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from utils.skills.alias_matcher import AliasMatcher, derived_aliases_for_name
+from utils.skills.alias_matcher import (
+    AliasMatcher,
+    derived_aliases_for_name,
+    resolve_catalog_skill_id,
+)
 from utils.skills.catalog import SkillCatalog, SkillRecord
 
 
@@ -72,6 +76,32 @@ def test_extra_alias_salesforce():
         "Configure Salesforce CRM",
     )
     assert any(h.skill_name == "Salesforce software" for h in hits)
+
+
+def test_extra_alias_react_via_software_suffix():
+    cat = _catalog_with(("React software", "react software"))
+    hits = AliasMatcher(cat).match("Frontend", "Build UI in React.js and TypeScript")
+    assert any(h.skill_name == "React software" for h in hits)
+
+
+def test_extra_alias_k8s():
+    cat = _catalog_with(("Kubernetes", "kubernetes"))
+    hits = AliasMatcher(cat).match("SRE", "Operate services on k8s")
+    assert any(h.skill_name == "Kubernetes" for h in hits)
+
+
+def test_extra_alias_nextjs():
+    cat = _catalog_with(("Next.js", "next.js"))
+    hits = AliasMatcher(cat).match("Engineer", "Experience with NextJS required")
+    assert any(h.skill_name == "Next.js" for h in hits)
+
+
+def test_resolve_catalog_skill_id_software_suffix_and_alias():
+    sid = uuid4()
+    by_name = {"react software": sid}
+    alias_map = {"react software": (sid, "React software")}
+    assert resolve_catalog_skill_id("react", by_name, alias_map) == sid
+    assert resolve_catalog_skill_id("missing", by_name, alias_map) is None
 
 
 def test_bare_go_not_matched_but_golang_is():
