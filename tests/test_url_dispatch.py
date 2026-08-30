@@ -34,7 +34,14 @@ _MOCK_CONFIGS = {
         "rate_limit_per_minute": 60,
         "config": {},
     }
-    for name in ("greenhouse", "ashby", "lever", "workday", "smartrecruiters")
+    for name in (
+        "greenhouse",
+        "ashby",
+        "lever",
+        "workday",
+        "smartrecruiters",
+        "successfactors",
+    )
 }
 
 srs.get_source_config = lambda name: _MOCK_CONFIGS.get(name)
@@ -132,6 +139,13 @@ def _expected_source(url: str) -> str | None:
         "api.smartrecruiters.com",
     ):
         return "smartrecruiters"
+    if hostname.endswith((".successfactors.com", ".successfactors.eu", ".sapsf.com", ".sapsf.eu")):
+        return "successfactors"
+    path = urlparse(url).path or ""
+    if hostname and "/job/" in path:
+        parts = [p for p in path.strip("/").split("/") if p]
+        if len(parts) >= 3 and parts[0] == "job" and parts[2].isdigit():
+            return "successfactors"
     return None
 
 
@@ -159,6 +173,10 @@ def main():
         ("Lever",   "https://jobs.lever.co/spotify/1ff4a4e3-897c-4eab-9ee2-aa7d1d07a9d6"),
         ("Workday", "https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/Illinois---Chicago/Success-Architect---Service-Cloud_JR343225"),
         ("SmartRecruiters", sr_url),
+        (
+            "SuccessFactors",
+            "https://jobs.sap.com/job/Bucharest-SAP-AI-Engineering-Architect-0030144/1381258133/",
+        ),
         ("Unknown", "https://example.com/job/123"),
     ]
 

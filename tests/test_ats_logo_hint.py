@@ -16,6 +16,8 @@ def test_board_urls():
     assert _board_url("smartrecruiters", "Visa") == "https://jobs.smartrecruiters.com/Visa"
     workday = "https://acme.wd1.myworkdayjobs.com/Careers"
     assert _board_url("workday", workday) == workday
+    sap = "https://jobs.sap.com"
+    assert _board_url("successfactors", sap) == sap
     assert _board_url("unknown", "acme") is None
 
 

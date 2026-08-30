@@ -15,6 +15,7 @@ def test_supports_presence_reconcile_ats_only():
     assert supports_presence_reconcile("lever")
     assert supports_presence_reconcile("workday")
     assert supports_presence_reconcile("smartrecruiters")
+    assert supports_presence_reconcile("successfactors")
     assert not supports_presence_reconcile("jobbank")
     assert not supports_presence_reconcile("")
 

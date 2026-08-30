@@ -47,6 +47,16 @@ class TestCompanyHandle:
     def test_bare_smartrecruiters_slug_passthrough(self):
         assert _company_handle("smartrecruiters", "Visa") == "Visa"
 
+    def test_successfactors_jobs_sap_extracts_brand(self):
+        assert _company_handle("successfactors", "https://jobs.sap.com") == "sap"
+
+    def test_successfactors_company_query(self):
+        result = _company_handle(
+            "successfactors",
+            "https://career5.successfactors.eu/career?company=SAP",
+        )
+        assert result == "SAP"
+
     def test_workday_malformed_url_falls_through(self):
         # urlparse("not-a-url").hostname is None → parts[0] is "" → falls through
         assert _company_handle("workday", "not-a-url") == "not-a-url"

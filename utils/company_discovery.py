@@ -9,7 +9,14 @@ so the routing table lives in exactly one place.
 """
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+from sources.api.successfactors_source import (
+    is_hosted_successfactors_host,
+    parse_successfactors_job_url,
+)
+
+_SF_SKIP_HOST_LABELS = frozenset({"www", "jobs", "job", "careers", "career"})
 
 
 def source_name_for_url(url: str) -> str | None:
@@ -33,6 +40,8 @@ def source_name_for_url(url: str) -> str | None:
         "api.smartrecruiters.com",
     ):
         return "smartrecruiters"
+    if is_hosted_successfactors_host(hostname) or parse_successfactors_job_url(url):
+        return "successfactors"
     return None
 
 
@@ -40,7 +49,7 @@ def parse_company_from_url(url: str) -> dict | None:
     """Parse a job posting URL into source metadata.
 
     Returns a dict with keys:
-      "source"           — one of "ashby", "lever", "greenhouse", "workday", "smartrecruiters"
+      "source"           — one of "ashby", "lever", "greenhouse", "workday", "smartrecruiters", "successfactors"
       "company_endpoint" — the value stored in source_companies.company_endpoint
       "company_name"     — human-readable name derived from the URL slug
 
@@ -74,6 +83,12 @@ def parse_company_from_url(url: str) -> dict | None:
         → company_endpoint = "{company}"  (case preserved)
       https://api.smartrecruiters.com/v1/companies/{company}/postings/{id}
         → company_endpoint = "{company}"
+
+    SuccessFactors RMK:
+      https://jobs.sap.com/job/{slug}/{id}/
+        → company_endpoint = "https://jobs.sap.com"
+      https://{tenant}.successfactors.eu/career?company={company}
+        → company_endpoint = "https://{tenant}.successfactors.eu"
     """
     if not url:
         return None
@@ -132,6 +147,9 @@ def parse_company_from_url(url: str) -> dict | None:
     if source == "smartrecruiters":
         return _parse_smartrecruiters(parsed, path)
 
+    if source == "successfactors":
+        return _parse_successfactors(parsed, url)
+
     return None  # unreachable, but satisfies type checkers
 
 
@@ -157,6 +175,38 @@ def _parse_workday(parsed) -> dict | None:
         "source": "workday",
         "company_endpoint": company_endpoint,
         "company_name": tenant.replace("-", " ").title(),
+    }
+
+
+def _company_name_from_sf_host(hostname: str) -> str:
+    labels = [p for p in (hostname or "").split(".") if p]
+    while len(labels) > 2 and labels[0].lower() in _SF_SKIP_HOST_LABELS:
+        labels = labels[1:]
+    if not labels:
+        return "Successfactors"
+    return labels[0].replace("-", " ").title()
+
+
+def _parse_successfactors(parsed, url: str) -> dict | None:
+    """Extract RMK origin (or hosted career host) as company_endpoint."""
+    rmk = parse_successfactors_job_url(url)
+    hostname = parsed.hostname or ""
+    origin = f"{parsed.scheme}://{hostname}"
+    if rmk:
+        origin, _job_id = rmk
+        return {
+            "source": "successfactors",
+            "company_endpoint": origin,
+            "company_name": _company_name_from_sf_host(hostname),
+        }
+    if not is_hosted_successfactors_host(hostname):
+        return None
+    company = (parse_qs(parsed.query).get("company") or [""])[0]
+    company_name = company if company else _company_name_from_sf_host(hostname)
+    return {
+        "source": "successfactors",
+        "company_endpoint": origin,
+        "company_name": company_name,
     }
 
 

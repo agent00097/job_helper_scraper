@@ -123,6 +123,24 @@ URL_CASES = [
         },
     ),
     (
+        "SuccessFactors RMK — SAP",
+        "https://jobs.sap.com/job/Bucharest-SAP-AI-Engineering-Architect-0030144/1381258133/",
+        {
+            "source": "successfactors",
+            "company_endpoint": "https://jobs.sap.com",
+            "company_name": "Sap",
+        },
+    ),
+    (
+        "SuccessFactors hosted — company query",
+        "https://career5.successfactors.eu/career?company=SAP&career_job_req_id=451475",
+        {
+            "source": "successfactors",
+            "company_endpoint": "https://career5.successfactors.eu",
+            "company_name": "SAP",
+        },
+    ),
+    (
         "Unknown → None",
         "https://example.com/job/123",
         None,

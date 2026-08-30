@@ -30,7 +30,9 @@ def _board_url(source_name: str, source_endpoint: str) -> Optional[str]:
         return f"https://boards.greenhouse.io/{endpoint}"
     if source == "smartrecruiters":
         return f"https://jobs.smartrecruiters.com/{endpoint}"
-    if source == "workday" and endpoint.startswith(("http://", "https://")):
+    if source in ("workday", "successfactors") and endpoint.startswith(
+        ("http://", "https://")
+    ):
         return endpoint.rstrip("/")
     return None
 

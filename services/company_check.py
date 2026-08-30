@@ -183,11 +183,23 @@ def _company_handle(source_name: str, source_endpoint: str) -> str:
     Most ATS sources store the slug directly in source_endpoint (e.g. "stripe").
     Workday stores a full board URL (e.g. "https://stripe.wd5.myworkdayjobs.com/careers");
     the first subdomain label is the tenant name we want.
+    SuccessFactors stores a career-site origin (e.g. "https://jobs.sap.com");
+    prefer ?company= when present, otherwise the brand host label.
     """
-    if source_name == "workday":
-        from urllib.parse import urlparse
-        host = urlparse(source_endpoint).hostname or ""
-        parts = host.split(".")
+    if source_name in ("workday", "successfactors"):
+        from urllib.parse import parse_qs, urlparse
+
+        parsed = urlparse(source_endpoint)
+        if source_name == "successfactors":
+            company = (parse_qs(parsed.query).get("company") or [""])[0]
+            if company:
+                return company
+        host = parsed.hostname or ""
+        parts = [p for p in host.split(".") if p]
+        if source_name == "successfactors":
+            skip = {"www", "jobs", "job", "careers", "career"}
+            while len(parts) > 2 and parts[0].lower() in skip:
+                parts = parts[1:]
         if parts and parts[0]:
             return parts[0]
     return source_endpoint
