@@ -18,6 +18,7 @@ from __future__ import annotations
 import html as _html
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from email.utils import parsedate_to_datetime
 from typing import Dict, List, Optional, Tuple
@@ -34,6 +35,11 @@ from utils.rate_limiter import RateLimiter
 logger = logging.getLogger(__name__)
 
 MAX_PAGES = 200
+# RMK tiles have no JD. First-run boards can have 150–2000 jobs; a detail GET
+# per job exceeds COMPANY_SCRAPE_TIMEOUT_SECONDS and saves nothing. Cap details
+# per run; later scrapes fill remaining descriptions via selective skip.
+DEFAULT_MAX_DETAIL_FETCHES = 50
+DEFAULT_DETAIL_WORKERS = 4
 _JOB_PATH_RE = re.compile(r"/job/([^/]+)/(\d+)/?$", re.IGNORECASE)
 _EMPLOYMENT_TYPE_RE = re.compile(
     r"Employment Type:\s*([^\n<]+)",
@@ -255,6 +261,22 @@ class SuccessFactorsSource(BaseSource):
     def __init__(self, name: str, source_id: str, config: Dict, rate_limit_per_minute: int):
         super().__init__(name, source_id, config)
         self.rate_limiter = RateLimiter(rate_limit_per_minute)
+        self._http = requests.Session()
+        self._http.headers.update(_REQUEST_HEADERS)
+
+    def _max_detail_fetches(self) -> int:
+        raw = self.config.get("max_detail_fetches_per_run", DEFAULT_MAX_DETAIL_FETCHES)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_DETAIL_FETCHES
+
+    def _detail_workers(self) -> int:
+        raw = self.config.get("detail_workers", DEFAULT_DETAIL_WORKERS)
+        try:
+            return max(1, min(int(raw), 8))
+        except (TypeError, ValueError):
+            return DEFAULT_DETAIL_WORKERS
 
     def fetch_jobs(self, company_endpoint: str, company_name: str) -> List[JobData]:
         try:
@@ -285,17 +307,38 @@ class SuccessFactorsSource(BaseSource):
         already_described = urls_with_existing_description(
             str(job.url) for _, job in list_parsed
         )
-        jobs: List[JobData] = []
-        detail_fetched = 0
+        pending: List[Tuple[Dict, JobData]] = []
         detail_skipped = 0
-
         for posting, list_job in list_parsed:
             if str(list_job.url) in already_described:
                 detail_skipped += 1
+            else:
+                pending.append((posting, list_job))
+
+        max_details = self._max_detail_fetches()
+        to_enrich = pending[:max_details]
+        deferred = pending[max_details:]
+        details_by_url: Dict[str, Optional[Dict]] = {}
+        if to_enrich:
+            workers = min(self._detail_workers(), len(to_enrich))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = {
+                    pool.submit(self._fetch_detail, str(job.url)): str(job.url)
+                    for _, job in to_enrich
+                }
+                for fut in as_completed(futs):
+                    details_by_url[futs[fut]] = fut.result()
+
+        enrich_urls = {str(job.url) for _, job in to_enrich}
+        jobs: List[JobData] = []
+        detail_fetched = 0
+        for posting, list_job in list_parsed:
+            url = str(list_job.url)
+            if url not in enrich_urls:
                 jobs.append(list_job)
                 continue
-            detail = self._fetch_detail(str(list_job.url))
             detail_fetched += 1
+            detail = details_by_url.get(url)
             if not detail:
                 jobs.append(list_job)
                 continue
@@ -316,11 +359,13 @@ class SuccessFactorsSource(BaseSource):
         jobs_with_desc = sum(1 for job in jobs if job.job_description)
         logger.info(
             "Fetched %d jobs from %s "
-            "(detail fetched %d, skipped %d; %d with descriptions this run, %d without)",
+            "(detail fetched %d, skipped %d, deferred %d; "
+            "%d with descriptions this run, %d without)",
             len(jobs),
             company_name,
             detail_fetched,
             detail_skipped,
+            len(deferred),
             jobs_with_desc,
             len(jobs) - jobs_with_desc,
         )
@@ -335,10 +380,10 @@ class SuccessFactorsSource(BaseSource):
         for _page in range(MAX_PAGES):
             self.rate_limiter.wait_if_needed()
             try:
-                response = requests.get(
+                response = self._http.get(
                     tile_url,
                     params={"startrow": startrow},
-                    headers={**_REQUEST_HEADERS, "Referer": f"{board_base}/search/"},
+                    headers={"Referer": f"{board_base}/search/"},
                     timeout=30,
                 )
                 response.raise_for_status()
@@ -381,7 +426,7 @@ class SuccessFactorsSource(BaseSource):
     def _fetch_detail(self, job_url: str) -> Optional[Dict]:
         self.rate_limiter.wait_if_needed()
         try:
-            response = requests.get(job_url, headers=_REQUEST_HEADERS, timeout=30)
+            response = self._http.get(job_url, timeout=30)
             response.raise_for_status()
         except requests.exceptions.RequestException as exc:
             logger.warning("SuccessFactors detail fetch failed for %s: %s", job_url, exc)

@@ -21,7 +21,8 @@ data:
   SCRAPE_QUEUE_STALE_AFTER_HOURS: "4"
   SCRAPE_QUEUE_STALL_MINUTES: "60"
   # Wall-clock cap per company board scrape (seconds); 0 disables.
-  COMPANY_SCRAPE_TIMEOUT_SECONDS: "600"
+  # SuccessFactors RMK lists can be 80+ tile pages before any JD fetches.
+  COMPANY_SCRAPE_TIMEOUT_SECONDS: "1200"
   # Small per-pod pool: 60 workers * max 2 stays under Postgres max_connections.
   # min 0 + short max_idle so idle consumers do not hold backends.
   DB_POOL_MIN_SIZE: "0"

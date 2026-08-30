@@ -10,8 +10,11 @@ VALUES (
     'api',
     TRUE,
     12,
-    30,
-    '{}'::jsonb
+    60,
+    '{
+        "max_detail_fetches_per_run": 50,
+        "detail_workers": 4
+    }'::jsonb
 )
 ON CONFLICT (name) DO UPDATE
 SET

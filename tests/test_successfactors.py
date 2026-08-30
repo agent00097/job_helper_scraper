@@ -225,23 +225,25 @@ def test_fetch_all_postings_paginates_by_tile_count():
     page3.raise_for_status = MagicMock()
     page3.text = "<ul></ul>"
 
-    with patch(
-        "sources.api.successfactors_source.requests.get",
-        side_effect=[page1, page2, page3],
-    ) as mock_get:
+    with patch.object(
+        source,
+        "_http",
+    ) as mock_http:
+        mock_http.get.side_effect = [page1, page2, page3]
         postings = source._fetch_all_postings("https://jobs.sap.com", "SAP")
 
     assert [p["id"] for p in postings] == ["1", "2"]
-    assert mock_get.call_count == 3
-    assert mock_get.call_args_list[0].kwargs["params"] == {"startrow": 0}
-    assert mock_get.call_args_list[1].kwargs["params"] == {"startrow": 1}
-    assert mock_get.call_args_list[2].kwargs["params"] == {"startrow": 2}
+    assert mock_http.get.call_count == 3
+    assert mock_http.get.call_args_list[0].kwargs["params"] == {"startrow": 0}
+    assert mock_http.get.call_args_list[1].kwargs["params"] == {"startrow": 1}
+    assert mock_http.get.call_args_list[2].kwargs["params"] == {"startrow": 2}
 
 
 def test_fetch_all_postings_raises_on_http_error():
     source = _source()
-    with patch(
-        "sources.api.successfactors_source.requests.get",
+    with patch.object(
+        source._http,
+        "get",
         side_effect=requests.exceptions.HTTPError("404"),
     ):
         try:
@@ -249,6 +251,59 @@ def test_fetch_all_postings_raises_on_http_error():
             raise AssertionError("expected HTTPError")
         except requests.exceptions.HTTPError:
             pass
+
+
+def test_fetch_jobs_caps_detail_fetches_per_run():
+    source = SuccessFactorsSource(
+        name="successfactors",
+        source_id="test-id",
+        config={"max_detail_fetches_per_run": 1, "detail_workers": 1},
+        rate_limit_per_minute=600,
+    )
+    postings = [
+        {
+            "id": "1",
+            "title": "Role A",
+            "url": "https://jobs.sap.com/job/City-Role-A-1/1/",
+            "location": "City",
+        },
+        {
+            "id": "2",
+            "title": "Role B",
+            "url": "https://jobs.sap.com/job/City-Role-B-2/2/",
+            "location": "City",
+        },
+        {
+            "id": "3",
+            "title": "Role C",
+            "url": "https://jobs.sap.com/job/City-Role-C-3/3/",
+            "location": "City",
+        },
+    ]
+    with patch.object(source, "_fetch_all_postings", return_value=postings), patch(
+        "sources.api.successfactors_source.urls_with_existing_description",
+        return_value=set(),
+    ), patch.object(
+        source,
+        "_fetch_detail",
+        return_value={
+            "title": "Role A",
+            "description": "Only first detail",
+            "location": "City",
+            "date_posted": None,
+            "company": "SAP",
+            "employment_type": None,
+            "apply_url": None,
+        },
+    ) as mock_detail:
+        jobs = source.fetch_jobs("https://jobs.sap.com", "SAP")
+
+    assert len(jobs) == 3
+    mock_detail.assert_called_once_with("https://jobs.sap.com/job/City-Role-A-1/1/")
+    by_id = {j.job_id_from_source: j for j in jobs}
+    assert "Only first detail" in (by_id["1"].job_description or "")
+    assert by_id["2"].job_description is None
+    assert by_id["3"].job_description is None
 
 
 def test_fetch_job_by_url_uses_detail():
