@@ -335,5 +335,6 @@ def save_jobs(
         duplicate_count += dupes
         for job_id, title, description in skill_jobs:
             _extract_skills_safe(job_id, title, description)
+        skill_jobs.clear()
 
     return saved_count, duplicate_count

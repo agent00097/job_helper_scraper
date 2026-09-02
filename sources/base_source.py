@@ -35,6 +35,10 @@ class BaseSource(ABC):
             List of JobData objects
         """
         pass
+
+    def release_resources(self) -> None:
+        """Drop per-company HTTP pools. Cached sources call this after each scrape."""
+        return
     
     @abstractmethod
     def get_rate_limit(self) -> int:

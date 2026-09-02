@@ -110,6 +110,11 @@ def _close_pool() -> None:
     _pool = None
 
 
+def close_pool() -> None:
+    """Close the process-wide pool so recycled workers do not leave backends."""
+    _close_pool()
+
+
 class _PooledConnection:
     """Connection whose close() returns it to the pool instead of discarding it."""
 

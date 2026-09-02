@@ -22,6 +22,7 @@ import requests
 from models import JobData
 from sources.base_source import BaseSource
 from utils.deduplication import urls_with_existing_description
+from utils.html_text import html_to_text
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
@@ -383,15 +384,7 @@ class SmartRecruitersSource(BaseSource):
             return None
 
     def _clean_html(self, html_content: str) -> str:
-        if not html_content:
-            return ""
-        try:
-            from bs4 import BeautifulSoup
-
-            return BeautifulSoup(html_content, "html.parser").get_text(separator="\n").strip()
-        except ImportError:
-            text = re.sub(r"<[^>]+>", " ", html_content)
-            return re.sub(r"\s+", " ", text).strip()
+        return html_to_text(html_content)
 
     def get_rate_limit(self) -> int:
         return self.rate_limiter.requests_per_minute

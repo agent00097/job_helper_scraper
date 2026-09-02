@@ -26,6 +26,7 @@ import db
 from models import JobData
 from sources.base_source import BaseSource
 from utils.geo import derive_country
+from utils.html_text import parsed_html
 from utils.occupation_category import from_noc, from_title
 from utils.rate_limiter import RateLimiter
 from utils.job_storage import save_job
@@ -96,6 +97,14 @@ class JobBankSource(BaseSource):
 
     def get_rate_limit(self) -> int:
         return self.rate_limiter.requests_per_minute
+
+    def release_resources(self) -> None:
+        try:
+            self.session.close()
+        except Exception:
+            logger.debug("JobBank session close failed", exc_info=True)
+        self.session = requests.Session()
+        self.session.headers.update(_HEADERS)
 
     # ------------------------------------------------------------------
     # Incremental runner
@@ -401,17 +410,21 @@ class JobBankSource(BaseSource):
     # ------------------------------------------------------------------
 
     def _parse_search_page(self, html: str) -> List[JobData]:
-        soup = BeautifulSoup(html, "html.parser")
-        articles = soup.find_all("article", class_="action-buttons")
-        jobs: List[JobData] = []
-        for article in articles:
-            try:
-                job = self._parse_article(article)
-                if job:
-                    jobs.append(job)
-            except Exception as e:
-                logger.warning("Job Bank: skipping article %s — %s", article.get("id", "?"), e)
-        return jobs
+        with parsed_html(html) as soup:
+            articles = soup.find_all("article", class_="action-buttons")
+            jobs: List[JobData] = []
+            for article in articles:
+                try:
+                    job = self._parse_article(article)
+                    if job:
+                        jobs.append(job)
+                except Exception as e:
+                    logger.warning(
+                        "Job Bank: skipping article %s — %s",
+                        article.get("id", "?"),
+                        e,
+                    )
+            return jobs
 
     def _parse_article(self, article) -> Optional[JobData]:
         raw_id = article.get("id", "")
@@ -504,20 +517,25 @@ class JobBankSource(BaseSource):
         time.sleep(random.uniform(0.4, 1.6))
         try:
             resp = self.session.get(job_url, timeout=30)
-            resp.raise_for_status()
         except requests.exceptions.RequestException as e:
             logger.warning("Job Bank detail fetch failed for %s: %s", job_url, e)
             return None, None
+        try:
+            resp.raise_for_status()
+            html_text = resp.text
+        except requests.exceptions.RequestException as e:
+            logger.warning("Job Bank detail fetch failed for %s: %s", job_url, e)
+            return None, None
+        finally:
+            resp.close()
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        desc_el = soup.find("div", class_="job-posting-detail-requirements")
-        if not desc_el:
-            logger.warning("Job Bank: no description container at %s", job_url)
-        description = desc_el.get_text(separator="\n", strip=True) if desc_el else None
-
-        noc_code = self._extract_noc(soup)
-        return description, noc_code
+        with parsed_html(html_text) as soup:
+            desc_el = soup.find("div", class_="job-posting-detail-requirements")
+            if not desc_el:
+                logger.warning("Job Bank: no description container at %s", job_url)
+            description = desc_el.get_text(separator="\n", strip=True) if desc_el else None
+            noc_code = self._extract_noc(soup)
+            return description, noc_code
 
     @staticmethod
     def _extract_noc(soup: BeautifulSoup) -> Optional[str]:

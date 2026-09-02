@@ -23,6 +23,9 @@ data:
   # Wall-clock cap per company board scrape (seconds); 0 disables.
   # SuccessFactors RMK lists can be 80+ tile pages before any JD fetches.
   COMPANY_SCRAPE_TIMEOUT_SECONDS: "1200"
+  # Recycle company-worker pods after this many boards so RSS cannot grow unbounded.
+  # 0 disables. Only the company-worker Deployment sets ABANDON_ON_TIMEOUT.
+  COMPANY_SCRAPE_MAX_TASKS_PER_PROCESS: "80"
   # Small per-pod pool: 60 workers * max 2 stays under Postgres max_connections.
   # min 0 + short max_idle so idle consumers do not hold backends.
   DB_POOL_MIN_SIZE: "0"

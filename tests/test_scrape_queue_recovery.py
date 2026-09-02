@@ -98,6 +98,9 @@ def test_company_scrape_timeout(impl):
     import time
 
     from services.company_scrape import scrape_one_company
+    from utils.process_hygiene import recycle_requested, reset_recycle_state_for_tests
+
+    reset_recycle_state_for_tests()
 
     def slow(*_a, **_k):
         time.sleep(3)
@@ -115,3 +118,46 @@ def test_company_scrape_timeout(impl):
     outcome = scrape_one_company(source, company)
     assert outcome.ok is False
     assert isinstance(outcome.error, TimeoutError)
+    assert recycle_requested() is False
+
+
+@patch("services.company_scrape._scrape_one_company_impl")
+@patch.dict(
+    "os.environ",
+    {
+        "COMPANY_SCRAPE_TIMEOUT_SECONDS": "1",
+        "COMPANY_SCRAPE_ABANDON_ON_TIMEOUT": "true",
+    },
+    clear=False,
+)
+def test_company_scrape_timeout_abandons_thread_and_recycles(impl):
+    import time
+
+    from services.company_scrape import scrape_one_company
+    from utils.process_hygiene import recycle_requested, reset_recycle_state_for_tests
+
+    reset_recycle_state_for_tests()
+    finished = {"done": False}
+
+    def slow(*_a, **_k):
+        time.sleep(3)
+        finished["done"] = True
+        return MagicMock(ok=True)
+
+    impl.side_effect = slow
+    source = MagicMock()
+    source.name = "ashby"
+    company = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "company_name": "SlowCo",
+        "normalized_name": "slowco",
+        "company_endpoint": "slowco",
+    }
+    started = time.monotonic()
+    outcome = scrape_one_company(source, company)
+    elapsed = time.monotonic() - started
+    assert outcome.ok is False
+    assert isinstance(outcome.error, TimeoutError)
+    assert elapsed < 2.0
+    assert recycle_requested() is True
+    assert finished["done"] is False

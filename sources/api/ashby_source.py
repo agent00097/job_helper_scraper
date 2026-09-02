@@ -2,7 +2,6 @@
 Ashby API source for fetching jobs from Ashby job boards.
 """
 import logging
-import re
 import requests
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -10,6 +9,7 @@ from urllib.parse import urlparse
 
 from sources.base_source import BaseSource
 from models import JobData
+from utils.html_text import html_to_text
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
@@ -165,15 +165,7 @@ class AshbySource(BaseSource):
 
     def _clean_html(self, html_content: str) -> str:
         """Strip HTML to plain text. Uses BeautifulSoup when available; falls back to regex."""
-        if not html_content:
-            return ""
-        try:
-            from bs4 import BeautifulSoup
-            return BeautifulSoup(html_content, "html.parser").get_text(separator="\n").strip()
-        except ImportError:
-            # Basic regex fallback — install beautifulsoup4 for better results.
-            text = re.sub(r"<[^>]+>", " ", html_content)
-            return re.sub(r"\s+", " ", text).strip()
+        return html_to_text(html_content)
 
     def get_rate_limit(self) -> int:
         return self.rate_limiter.requests_per_minute

@@ -13,6 +13,11 @@ from pika.adapters.blocking_connection import BlockingChannel
 from pika.spec import Basic
 
 from services.scrape_request_service import MessageDisposition, process_job_scrape_request_body
+from utils.process_hygiene import (
+    recycle_current_process,
+    recycle_requested,
+    stop_consumer_for_recycle,
+)
 from workers.rabbitmq_settings import RabbitMQWorkerSettings, load_rabbitmq_worker_settings
 
 logger = logging.getLogger(__name__)
@@ -48,14 +53,18 @@ class RabbitMQJobWorker:
         _properties: Any,
         body: bytes,
     ) -> None:
-        disposition = self._on_body(body)
-        tag = method.delivery_tag
-        if disposition == MessageDisposition.ACK:
-            channel.basic_ack(delivery_tag=tag)
-        elif disposition == MessageDisposition.NACK_NO_REQUEUE:
-            channel.basic_nack(delivery_tag=tag, requeue=False)
-        else:
-            channel.basic_nack(delivery_tag=tag, requeue=self.settings.requeue_on_failure)
+        try:
+            disposition = self._on_body(body)
+            tag = method.delivery_tag
+            if disposition == MessageDisposition.ACK:
+                channel.basic_ack(delivery_tag=tag)
+            elif disposition == MessageDisposition.NACK_NO_REQUEUE:
+                channel.basic_nack(delivery_tag=tag, requeue=False)
+            else:
+                channel.basic_nack(delivery_tag=tag, requeue=self.settings.requeue_on_failure)
+        finally:
+            if stop_consumer_for_recycle(channel, self._stopping):
+                self._stopping = True
 
     def _register_signals(self) -> None:
         def handle(_sig, _frame):
@@ -92,6 +101,8 @@ class RabbitMQJobWorker:
                     break
                 logger.exception("Unexpected consumer error: %s; reconnecting in %ss", e, delay)
                 time.sleep(delay)
+        if recycle_requested():
+            recycle_current_process()
         logger.info("RabbitMQ worker exited.")
 
     def _run_session(self) -> None:

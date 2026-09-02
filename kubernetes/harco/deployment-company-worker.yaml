@@ -64,6 +64,10 @@ spec:
                   name: jobscraper-openai
                   key: OPENAI_API_KEY
                   optional: true
+            - name: COMPANY_SCRAPE_ABANDON_ON_TIMEOUT
+              value: "true"
+            - name: COMPANY_SCRAPE_MAX_TASKS_PER_PROCESS
+              value: "80"
           resources:
             requests:
               memory: "256Mi"

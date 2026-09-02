@@ -9,7 +9,6 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -66,65 +65,66 @@ def _logo_from_json(node: object, base_url: str) -> Optional[str]:
 
 
 def _extract_logo_url(html: str, base_url: str) -> Optional[str]:
-    soup = BeautifulSoup(html, "html.parser")
+    from utils.html_text import parsed_html
 
-    # ATS pages frequently embed organization metadata in JSON/JSON-LD.
-    for script in soup.find_all("script"):
-        script_type = (script.get("type") or "").lower()
-        if "json" not in script_type and not script.get("id"):
-            continue
-        raw = script.string or script.get_text() or ""
-        if not raw.strip():
-            continue
-        try:
-            data = json.loads(raw)
-        except (TypeError, ValueError):
-            continue
-        result = _logo_from_json(data, base_url)
-        if result:
-            return result
+    with parsed_html(html) as soup:
+        # ATS pages frequently embed organization metadata in JSON/JSON-LD.
+        for script in soup.find_all("script"):
+            script_type = (script.get("type") or "").lower()
+            if "json" not in script_type and not script.get("id"):
+                continue
+            raw = script.string or script.get_text() or ""
+            if not raw.strip():
+                continue
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            result = _logo_from_json(data, base_url)
+            if result:
+                return result
 
-    # Ashby sometimes serializes theme data into inline JavaScript rather than
-    # a JSON script. Prefer the square mark, then the wordmark.
-    for key in ("logoSquareImageUrl", "logoWordmarkImageUrl"):
-        match = re.search(
-            rf'"{key}"\s*:\s*"((?:\\.|[^"])*)"',
-            html,
-        )
-        if not match:
-            continue
-        try:
-            value = json.loads(f'"{match.group(1)}"')
-        except (TypeError, ValueError):
-            value = match.group(1).replace(r"\/", "/")
-        if isinstance(value, str) and value.strip():
-            return urljoin(base_url, value.strip())
+        # Ashby sometimes serializes theme data into inline JavaScript rather than
+        # a JSON script. Prefer the square mark, then the wordmark.
+        for key in ("logoSquareImageUrl", "logoWordmarkImageUrl"):
+            match = re.search(
+                rf'"{key}"\s*:\s*"((?:\\.|[^"])*)"',
+                html,
+            )
+            if not match:
+                continue
+            try:
+                value = json.loads(f'"{match.group(1)}"')
+            except (TypeError, ValueError):
+                value = match.group(1).replace(r"\/", "/")
+            if isinstance(value, str) and value.strip():
+                return urljoin(base_url, value.strip())
 
-    # Lever/Greenhouse and customized boards commonly render a logo <img>.
-    for image in soup.find_all("img"):
-        src = (image.get("src") or image.get("data-src") or "").strip()
-        if not src:
-            continue
-        classes = image.get("class") or []
-        context = " ".join(
-            [src, image.get("alt") or "", image.get("id") or "", *classes]
-        ).lower()
-        if any(token in context for token in ("logo", "brand", "employer")):
-            return urljoin(base_url, src)
+        # Lever/Greenhouse and customized boards commonly render a logo <img>.
+        for image in soup.find_all("img"):
+            src = (image.get("src") or image.get("data-src") or "").strip()
+            if not src:
+                continue
+            classes = image.get("class") or []
+            context = " ".join(
+                [src, image.get("alt") or "", image.get("id") or "", *classes]
+            ).lower()
+            if any(token in context for token in ("logo", "brand", "employer")):
+                return urljoin(base_url, src)
 
-    # Social preview image is less precise, so keep it as the final hint.
-    for key in ("og:image", "twitter:image", "twitter:image:src"):
-        tag = soup.find(
-            "meta",
-            attrs={
-                "property": key,
-            },
-        ) or soup.find("meta", attrs={"name": key})
-        if tag:
-            content = (tag.get("content") or "").strip()
-            if content:
-                return urljoin(base_url, content)
-    return None
+        # Social preview image is less precise, so keep it as the final hint.
+        for key in ("og:image", "twitter:image", "twitter:image:src"):
+            tag = soup.find(
+                "meta",
+                attrs={
+                    "property": key,
+                },
+            ) or soup.find("meta", attrs={"name": key})
+            if tag:
+                content = (tag.get("content") or "").strip()
+                if content:
+                    return urljoin(base_url, content)
+        return None
 
 
 @lru_cache(maxsize=2048)
@@ -142,12 +142,17 @@ def resolve_ats_logo_hint(
             allow_redirects=True,
             headers={"User-Agent": "Mozilla/5.0 HarcoJobScraper/1.0"},
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+            html_text = response.text
+            resolved_url = response.url
+        finally:
+            response.close()
     except requests.RequestException as exc:
         logger.debug("ATS logo hint fetch failed url=%s: %s", board_url, exc)
         return None
 
-    logo_url = _extract_logo_url(response.text, response.url)
+    logo_url = _extract_logo_url(html_text, resolved_url)
     if logo_url:
         logger.info(
             "Captured ATS logo hint source=%s endpoint=%s",

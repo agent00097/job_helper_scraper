@@ -25,10 +25,12 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, unquote
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from models import JobData
 from sources.base_source import BaseSource
 from utils.deduplication import urls_with_existing_description
+from utils.html_text import html_to_text, parsed_html
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
@@ -149,45 +151,47 @@ def parse_tiles(html_text: str, job_base: str) -> List[Dict]:
     if not html_text or not html_text.strip():
         return []
     try:
-        from bs4 import BeautifulSoup
+        with parsed_html(html_text) as soup:
+            tiles = soup.select("li.job-tile[data-url]") or soup.select("[data-url]")
+            out: List[Dict] = []
+            seen: set[str] = set()
+            for tile in tiles:
+                path = (tile.get("data-url") or "").strip()
+                parsed = _JOB_PATH_RE.search(path)
+                if not parsed:
+                    continue
+                job_id = parsed.group(2)
+                if job_id in seen:
+                    continue
+                seen.add(job_id)
+                link = tile.select_one("a.jobTitle-link") or tile.find("a", href=True)
+                title = ""
+                if link:
+                    title = link.get_text(" ", strip=True)
+                    if not path:
+                        path = (link.get("href") or "").strip()
+                loc_el = tile.select_one(".jobGeoLocation, .jobLocation, .job-location")
+                location = loc_el.get_text(" ", strip=True) if loc_el else None
+                if not location:
+                    location = city_from_slug(path, title)
+                url = (
+                    path
+                    if path.startswith(("http://", "https://"))
+                    else urljoin(job_base + "/", path.lstrip("/"))
+                )
+                if not title:
+                    continue
+                out.append(
+                    {
+                        "id": job_id,
+                        "title": title,
+                        "url": url,
+                        "location": location or None,
+                    }
+                )
+            return out
     except ImportError:
         return _parse_tiles_regex(html_text, job_base)
-
-    soup = BeautifulSoup(html_text, "html.parser")
-    tiles = soup.select("li.job-tile[data-url]") or soup.select("[data-url]")
-    out: List[Dict] = []
-    seen: set[str] = set()
-    for tile in tiles:
-        path = (tile.get("data-url") or "").strip()
-        parsed = _JOB_PATH_RE.search(path)
-        if not parsed:
-            continue
-        job_id = parsed.group(2)
-        if job_id in seen:
-            continue
-        seen.add(job_id)
-        link = tile.select_one("a.jobTitle-link") or tile.find("a", href=True)
-        title = ""
-        if link:
-            title = link.get_text(" ", strip=True)
-            if not path:
-                path = (link.get("href") or "").strip()
-        loc_el = tile.select_one(".jobGeoLocation, .jobLocation, .job-location")
-        location = loc_el.get_text(" ", strip=True) if loc_el else None
-        if not location:
-            location = city_from_slug(path, title)
-        url = path if path.startswith(("http://", "https://")) else urljoin(job_base + "/", path.lstrip("/"))
-        if not title:
-            continue
-        out.append(
-            {
-                "id": job_id,
-                "title": title,
-                "url": url,
-                "location": location or None,
-            }
-        )
-    return out
 
 
 def _parse_tiles_regex(html_text: str, job_base: str) -> List[Dict]:
@@ -261,8 +265,26 @@ class SuccessFactorsSource(BaseSource):
     def __init__(self, name: str, source_id: str, config: Dict, rate_limit_per_minute: int):
         super().__init__(name, source_id, config)
         self.rate_limiter = RateLimiter(rate_limit_per_minute)
-        self._http = requests.Session()
-        self._http.headers.update(_REQUEST_HEADERS)
+        self._http = self._new_http_session()
+
+    @staticmethod
+    def _new_http_session() -> requests.Session:
+        session = requests.Session()
+        session.headers.update(_REQUEST_HEADERS)
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
+
+    def release_resources(self) -> None:
+        """Close pooled HTTP connections so they are not held between companies."""
+        session = getattr(self, "_http", None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                logger.debug("SuccessFactors session close failed", exc_info=True)
+        self._http = self._new_http_session()
 
     def _max_detail_fetches(self) -> int:
         raw = self.config.get("max_detail_fetches_per_run", DEFAULT_MAX_DETAIL_FETCHES)
@@ -386,8 +408,11 @@ class SuccessFactorsSource(BaseSource):
                     headers={"Referer": f"{board_base}/search/"},
                     timeout=30,
                 )
-                response.raise_for_status()
-                html_text = response.text or ""
+                try:
+                    response.raise_for_status()
+                    html_text = response.text or ""
+                finally:
+                    response.close()
             except requests.exceptions.RequestException as exc:
                 logger.warning(
                     "SuccessFactors list fetch failed at startrow %d for %s: %s",
@@ -425,72 +450,80 @@ class SuccessFactorsSource(BaseSource):
 
     def _fetch_detail(self, job_url: str) -> Optional[Dict]:
         self.rate_limiter.wait_if_needed()
+        # Short-lived session: ThreadPoolExecutor workers must not share self._http.
         try:
-            response = self._http.get(job_url, timeout=30)
-            response.raise_for_status()
+            with requests.Session() as session:
+                session.headers.update(_REQUEST_HEADERS)
+                response = session.get(job_url, timeout=30)
+                response.raise_for_status()
+                html_text = response.text or ""
         except requests.exceptions.RequestException as exc:
             logger.warning("SuccessFactors detail fetch failed for %s: %s", job_url, exc)
             return None
-        return self._parse_detail_html(response.text or "", job_url)
+        return self._parse_detail_html(html_text, job_url)
 
     def _parse_detail_html(self, html_text: str, job_url: str) -> Optional[Dict]:
         if not html_text:
             return None
         try:
-            from bs4 import BeautifulSoup
+            with parsed_html(html_text) as soup:
+                # Comma selectors pick the first match in document order; the Apply
+                # button sits in .jobTitle before the real h1 on RMK pages.
+                title_el = (
+                    soup.select_one('h1 [itemprop="title"]')
+                    or soup.select_one('[itemprop="title"]')
+                    or soup.select_one("h1")
+                )
+                desc_el = (
+                    soup.select_one('[itemprop="description"]')
+                    or soup.select_one("span.jobdescription")
+                    or soup.select_one(".jobdescription")
+                )
+                loc_el = (
+                    soup.select_one(".jobGeoLocation")
+                    or soup.select_one("#job-location")
+                    or soup.select_one(".jobLocation")
+                )
+                posted_el = soup.select_one(
+                    'meta[itemprop="datePosted"]'
+                ) or soup.select_one('[data-careersite-propertyid="date"]')
+                org_el = soup.select_one('meta[itemprop="hiringOrganization"]')
+                apply_el = soup.select_one("a.dialogApplyBtn") or soup.select_one(
+                    "a[href*='/talentcommunity/apply/']"
+                )
+
+                posted_raw = None
+                if posted_el:
+                    posted_raw = posted_el.get("content") or posted_el.get_text(
+                        " ", strip=True
+                    )
+
+                apply_url = None
+                if apply_el and apply_el.get("href"):
+                    apply_url = urljoin(job_url, apply_el["href"])
+
+                description_html = str(desc_el) if desc_el else ""
+                employment_type = None
+                if desc_el:
+                    emp = _EMPLOYMENT_TYPE_RE.search(
+                        desc_el.get_text("\n", strip=True)
+                    )
+                    if emp:
+                        employment_type = emp.group(1).strip() or None
+
+                return {
+                    "title": title_el.get_text(" ", strip=True) if title_el else None,
+                    "description": (
+                        self._clean_html(description_html) if description_html else None
+                    ),
+                    "location": loc_el.get_text(" ", strip=True) if loc_el else None,
+                    "date_posted": _parse_posted_date(posted_raw),
+                    "company": org_el.get("content") if org_el else None,
+                    "employment_type": employment_type,
+                    "apply_url": apply_url,
+                }
         except ImportError:
             return {"description": self._clean_html(html_text) or None}
-
-        soup = BeautifulSoup(html_text, "html.parser")
-        # Comma selectors pick the first match in document order; the Apply
-        # button sits in .jobTitle before the real h1 on RMK pages.
-        title_el = (
-            soup.select_one('h1 [itemprop="title"]')
-            or soup.select_one('[itemprop="title"]')
-            or soup.select_one("h1")
-        )
-        desc_el = (
-            soup.select_one('[itemprop="description"]')
-            or soup.select_one("span.jobdescription")
-            or soup.select_one(".jobdescription")
-        )
-        loc_el = (
-            soup.select_one(".jobGeoLocation")
-            or soup.select_one("#job-location")
-            or soup.select_one(".jobLocation")
-        )
-        posted_el = soup.select_one('meta[itemprop="datePosted"]') or soup.select_one(
-            '[data-careersite-propertyid="date"]'
-        )
-        org_el = soup.select_one('meta[itemprop="hiringOrganization"]')
-        apply_el = soup.select_one("a.dialogApplyBtn") or soup.select_one(
-            "a[href*='/talentcommunity/apply/']"
-        )
-
-        posted_raw = None
-        if posted_el:
-            posted_raw = posted_el.get("content") or posted_el.get_text(" ", strip=True)
-
-        apply_url = None
-        if apply_el and apply_el.get("href"):
-            apply_url = urljoin(job_url, apply_el["href"])
-
-        description_html = str(desc_el) if desc_el else ""
-        employment_type = None
-        if desc_el:
-            emp = _EMPLOYMENT_TYPE_RE.search(desc_el.get_text("\n", strip=True))
-            if emp:
-                employment_type = emp.group(1).strip() or None
-
-        return {
-            "title": title_el.get_text(" ", strip=True) if title_el else None,
-            "description": self._clean_html(description_html) if description_html else None,
-            "location": loc_el.get_text(" ", strip=True) if loc_el else None,
-            "date_posted": _parse_posted_date(posted_raw),
-            "company": org_el.get("content") if org_el else None,
-            "employment_type": employment_type,
-            "apply_url": apply_url,
-        }
 
     def _parse_job(
         self,
@@ -578,16 +611,7 @@ class SuccessFactorsSource(BaseSource):
             return None
 
     def _clean_html(self, html_content: str) -> str:
-        if not html_content:
-            return ""
-        try:
-            from bs4 import BeautifulSoup
-
-            text = BeautifulSoup(html_content, "html.parser").get_text(separator="\n")
-            return _html.unescape(text).strip()
-        except ImportError:
-            text = re.sub(r"<[^>]+>", " ", html_content)
-            return _html.unescape(re.sub(r"\s+", " ", text)).strip()
+        return html_to_text(html_content)
 
     def get_rate_limit(self) -> int:
         return self.rate_limiter.requests_per_minute

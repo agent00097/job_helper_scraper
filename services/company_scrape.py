@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
@@ -20,6 +20,11 @@ from utils.job_archive import (
     supports_presence_reconcile,
 )
 from utils.job_storage import save_jobs
+from utils.process_hygiene import (
+    abandon_scrape_on_timeout,
+    collect_garbage,
+    request_recycle,
+)
 from utils.source_loader import update_company_last_fetched
 
 logger = logging.getLogger(__name__)
@@ -68,23 +73,56 @@ def scrape_one_company(source: BaseSource, company: dict[str, Any]) -> CompanySc
 
     Enforces COMPANY_SCRAPE_TIMEOUT_SECONDS (default 600) wall-clock limit so
     one pathological board cannot hold a worker forever.
+
+    Timed-out work runs on a daemon thread. The in-process JobBank path waits
+    for that thread so scrapes do not overlap. The company-queue worker
+    (COMPANY_SCRAPE_ABANDON_ON_TIMEOUT) returns immediately and recycles the
+    process after ACK so leftover HTTP/parse state is reaped by the OS.
     """
     timeout = _company_scrape_timeout_seconds()
     if timeout <= 0:
         return _scrape_one_company_impl(source, company)
+    return _run_scrape_with_timeout(source, company, timeout)
 
+
+def _run_scrape_with_timeout(
+    source: BaseSource, company: dict[str, Any], timeout: int
+) -> CompanyScrapeOutcome:
     company_name = company.get("company_name", "?")
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(_scrape_one_company_impl, source, company)
-        try:
-            return fut.result(timeout=timeout)
-        except FuturesTimeoutError:
-            err = TimeoutError(
-                f"{source.name}/{company_name}: exceeded "
-                f"{timeout}s company scrape timeout"
-            )
-            logger.error("%s", err)
-            return CompanyScrapeOutcome(ok=False, error=err)
+    box: dict[str, CompanyScrapeOutcome] = {}
+
+    def run() -> None:
+        box["outcome"] = _scrape_one_company_impl(source, company)
+
+    thread = threading.Thread(
+        target=run,
+        name=f"company-scrape-{company_name}"[:80],
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout)
+    if not thread.is_alive():
+        return box.get(
+            "outcome",
+            CompanyScrapeOutcome(
+                ok=False,
+                error=RuntimeError("scrape thread exited without a result"),
+            ),
+        )
+
+    err = TimeoutError(
+        f"{source.name}/{company_name}: exceeded {timeout}s company scrape timeout"
+    )
+    logger.error("%s", err)
+    if abandon_scrape_on_timeout():
+        request_recycle(
+            f"{source.name}/{company_name}: scrape still running after {timeout}s"
+        )
+    else:
+        # In-process scheduler: do not start the next company until this one
+        # finishes, otherwise daemon threads stack and retain memory.
+        thread.join()
+    return CompanyScrapeOutcome(ok=False, error=err)
 
 
 def _scrape_one_company_impl(
@@ -144,6 +182,7 @@ def _scrape_one_company_impl(
             logger.info("%s/%s: no jobs found", source.name, company_name)
 
         update_company_last_fetched(company_id)
+        jobs.clear()
         return CompanyScrapeOutcome(
             ok=True,
             jobs_fetched=fetched_count,
@@ -154,3 +193,16 @@ def _scrape_one_company_impl(
     except Exception as exc:
         logger.error("Error processing %s from %s: %s", company_name, source.name, exc)
         return CompanyScrapeOutcome(ok=False, error=exc)
+    finally:
+        release = getattr(source, "release_resources", None)
+        if callable(release):
+            try:
+                release()
+            except Exception:
+                logger.debug(
+                    "source.release_resources failed for %s/%s",
+                    source.name,
+                    company_name,
+                    exc_info=True,
+                )
+        collect_garbage()

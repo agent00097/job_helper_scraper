@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 from services.company_scrape import scrape_one_company
 from services.scrape_request_service import MessageDisposition
 from sources.source_factory import create_source
+from utils.process_hygiene import note_company_task_finished
 from utils.scrape_stats import ScrapeRunRecorder, record_dropped_company_task
 from utils.source_loader import get_source_config
 from workers.rabbitmq_settings import load_rabbitmq_worker_settings
@@ -213,12 +214,15 @@ def process_company_scrape_body(body: bytes | str) -> MessageDisposition:
         else:
             cr.mark_failure(RuntimeError("scrape failed"), fetched=outcome.jobs_fetched)
 
-    if not cr.persisted:
-        logger.error(
-            "company_scrape_tasks: result not persisted run=%s company=%s — requeue",
-            task.run_id,
-            task.company_id,
-        )
-        return MessageDisposition.NACK_REQUEUE
+    try:
+        if not cr.persisted:
+            logger.error(
+                "company_scrape_tasks: result not persisted run=%s company=%s — requeue",
+                task.run_id,
+                task.company_id,
+            )
+            return MessageDisposition.NACK_REQUEUE
 
-    return MessageDisposition.ACK
+        return MessageDisposition.ACK
+    finally:
+        note_company_task_finished()

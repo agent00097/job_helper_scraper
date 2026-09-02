@@ -4,7 +4,6 @@ Workday API source for fetching jobs from Workday career boards.
 company_endpoint is the full board URL, e.g.:
     https://salesforce.wd12.myworkdayjobs.com/External_Career_Site
 """
-import html as _html
 import logging
 import re
 import requests
@@ -15,6 +14,7 @@ from urllib.parse import urlparse
 from models import JobData
 from sources.base_source import BaseSource
 from utils.deduplication import urls_with_existing_description
+from utils.html_text import html_to_text
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
 
@@ -340,15 +340,7 @@ class WorkdaySource(BaseSource):
         &#xa; (newline) and &#x2019; (right-quote) become real characters even
         if the parser left any residual references in the output.
         """
-        if not html_content:
-            return ""
-        try:
-            from bs4 import BeautifulSoup
-            text = BeautifulSoup(html_content, "html.parser").get_text(separator="\n")
-            return _html.unescape(text).strip()
-        except ImportError:
-            text = re.sub(r"<[^>]+>", " ", html_content)
-            return _html.unescape(re.sub(r"\s+", " ", text)).strip()
+        return html_to_text(html_content)
 
     def fetch_job_by_url(self, url: str) -> Optional[JobData]:
         """Fetch a single JobData from a public Workday job page URL.
