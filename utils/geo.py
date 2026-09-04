@@ -233,6 +233,68 @@ _FOREIGN_COUNTRIES: dict[str, str] = {
     "jamaica": "JM", "puerto rico": "PR",
 }
 
+# ---------------------------------------------------------------------------
+# Non-US/CA cities, for postings that abbreviate the country to two letters.
+#
+# Many ISO country codes collide with US state / CA province abbreviations, so
+# "Tel Aviv, IL" would otherwise read as Illinois and "Bangalore, IN" as
+# Indiana. These cities have no US/CA namesake worth worrying about, so the
+# city wins over the abbreviation. US/CA rules still run first for everything
+# not listed here ("Springfield, IL" stays Illinois).
+# ---------------------------------------------------------------------------
+
+_FOREIGN_CITIES: dict[str, str] = {
+    # Israel (IL = Illinois)
+    "tel aviv": "IL", "tel aviv-yafo": "IL", "tel aviv yafo": "IL",
+    "tel-aviv": "IL", "ramat gan": "IL", "herzliya": "IL",
+    "herzliyya": "IL", "ra'anana": "IL", "raanana": "IL",
+    "petah tikva": "IL", "petach tikva": "IL", "hod hasharon": "IL",
+    "kfar saba": "IL", "netanya": "IL", "haifa": "IL", "jerusalem": "IL",
+    "rehovot": "IL", "yokneam": "IL", "yokneam illit": "IL",
+    "beer sheva": "IL", "be'er sheva": "IL", "beersheba": "IL",
+    "caesarea": "IL", "airport city": "IL", "modiin": "IL",
+    # India (IN = Indiana)
+    "bangalore": "IN", "bengaluru": "IN", "hyderabad": "IN", "pune": "IN",
+    "chennai": "IN", "mumbai": "IN", "bombay": "IN", "new delhi": "IN",
+    "gurgaon": "IN", "gurugram": "IN", "noida": "IN", "kolkata": "IN",
+    "ahmedabad": "IN", "jaipur": "IN", "kochi": "IN", "cochin": "IN",
+    "coimbatore": "IN", "thiruvananthapuram": "IN", "trivandrum": "IN",
+    "indore": "IN", "chandigarh": "IN", "mysore": "IN", "mysuru": "IN",
+    "nagpur": "IN", "vadodara": "IN", "bhubaneswar": "IN",
+    "visakhapatnam": "IN", "navi mumbai": "IN", "thane": "IN",
+    # Indonesia (ID = Idaho)
+    "jakarta": "ID", "bandung": "ID", "surabaya": "ID", "yogyakarta": "ID",
+    "denpasar": "ID", "tangerang": "ID",
+    # Morocco (MA = Massachusetts)
+    "casablanca": "MA", "rabat": "MA", "marrakech": "MA", "marrakesh": "MA",
+    "tangier": "MA",
+    # Slovakia (SK = Saskatchewan)
+    "bratislava": "SK", "kosice": "SK", "košice": "SK",
+    # Latin America (AR / CO / PE collide with Arkansas / Colorado / Pennsylvania)
+    "buenos aires": "AR", "rosario": "AR", "mendoza": "AR",
+    "bogota": "CO", "bogotá": "CO", "medellin": "CO", "medellín": "CO",
+    "barranquilla": "CO", "cartagena": "CO",
+    # Elsewhere
+    "chisinau": "MD", "chișinău": "MD", "valletta": "MT", "tunis": "TN",
+    "tirana": "AL", "vientiane": "LA", "macau": "MO", "macao": "MO",
+}
+
+# Cities with a real US/CA namesake ("Berlin, CT", "Lima, OH", "Delhi, CA").
+# Only trusted when the posting also spells the country as its ISO code.
+_AMBIGUOUS_FOREIGN_CITIES: dict[str, str] = {
+    "berlin": "DE", "hamburg": "DE", "frankfurt": "DE", "munich": "DE",
+    "münchen": "DE", "cologne": "DE", "köln": "DE", "stuttgart": "DE",
+    "düsseldorf": "DE", "dusseldorf": "DE", "hanover": "DE",
+    "hannover": "DE", "bremen": "DE", "leipzig": "DE", "dresden": "DE",
+    "nuremberg": "DE", "nürnberg": "DE", "karlsruhe": "DE",
+    "heidelberg": "DE", "bonn": "DE", "essen": "DE", "dortmund": "DE",
+    "delhi": "IN", "lima": "PE", "panama city": "PA", "cordoba": "AR",
+    "córdoba": "AR", "cali": "CO", "valencia": "ES", "naples": "IT",
+    "rome": "IT", "milan": "IT", "florence": "IT", "athens": "GR",
+    "vienna": "AT", "moscow": "RU", "odessa": "UA", "cairo": "EG",
+    "manchester": "GB", "birmingham": "GB", "sydney": "AU",
+}
+
 _FOREIGN_COUNTRY_RE = re.compile(
     r"\b(" + "|".join(
         re.escape(name)
@@ -368,6 +430,13 @@ def parse_location(location: Optional[str]) -> GeoParts:
         locality = _clean_locality(parts[0])
         admin_raw = parts[1]
         admin_code, country, admin_name = _resolve_admin(admin_raw)
+        foreign_city = _foreign_city(locality, iso_token=_iso_token(admin_raw))
+        if foreign_city:
+            return GeoParts(
+                country_code=foreign_city,
+                locality=locality or None,
+                geo_precision="locality" if locality else "country",
+            )
         if not country and len(parts) >= 3:
             country = _country_keyword(parts[2].lower()) or derive_country_fast(parts[2])
         if admin_code:
@@ -464,6 +533,14 @@ def parse_location(location: Optional[str]) -> GeoParts:
                 geo_precision="admin1",
             )
 
+    bare_foreign_city = _foreign_city(cleaned)
+    if bare_foreign_city:
+        return GeoParts(
+            country_code=bare_foreign_city,
+            locality=cleaned or None,
+            geo_precision="locality" if cleaned else "country",
+        )
+
     country = (
         _country_keyword(cleaned_lower)
         or derive_country_fast(cleaned)
@@ -503,6 +580,31 @@ def derive_country_fast(location: str) -> Optional[str]:
     for city in _US_CITIES:
         if re.search(r"\b" + re.escape(city) + r"\b", loc_lower):
             return "US"
+    return None
+
+
+def _iso_token(token: str) -> Optional[str]:
+    """The bare two-letter code in a token ("IL", " il "), else None."""
+    compact = re.sub(r"[^A-Za-z]", "", token or "").upper()
+    return compact if len(compact) == 2 else None
+
+
+def _foreign_city(locality: str, *, iso_token: Optional[str] = None) -> Optional[str]:
+    """
+    ISO code for a known non-US/CA city, else None.
+
+    Cities with a US/CA namesake only resolve when the posting spelled the
+    country as its ISO code ("Berlin, DE" is Germany, "Berlin, CT" is not).
+    """
+    if not locality or not locality.strip():
+        return None
+    key = locality.strip().lower()
+    code = _FOREIGN_CITIES.get(key)
+    if code:
+        return code
+    ambiguous = _AMBIGUOUS_FOREIGN_CITIES.get(key)
+    if ambiguous and iso_token and iso_token == ambiguous:
+        return ambiguous
     return None
 
 
