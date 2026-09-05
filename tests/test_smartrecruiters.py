@@ -172,6 +172,39 @@ def test_fetch_jobs_details_all_when_none_described():
     assert all("desc-" in (j.job_description or "") for j in jobs)
 
 
+def test_fetch_jobs_caps_detail_fetches_per_run():
+    source = SmartRecruitersSource(
+        name="smartrecruiters",
+        source_id="test-id",
+        config={"max_detail_fetches_per_run": 1},
+        rate_limit_per_minute=600,
+    )
+    with patch.object(
+        source,
+        "_fetch_all_postings",
+        return_value=[
+            _list_posting("201", "Role A"),
+            _list_posting("202", "Role B"),
+            _list_posting("203", "Role C"),
+        ],
+    ), patch(
+        "sources.api.smartrecruiters_source.urls_with_existing_description",
+        return_value=set(),
+    ), patch.object(
+        source,
+        "_fetch_detail",
+        side_effect=lambda _ep, jid: _detail(jid, f"Role {jid}", f"desc-{jid}"),
+    ) as mock_detail:
+        jobs = source.fetch_jobs("Visa", "Visa")
+
+    assert len(jobs) == 3
+    mock_detail.assert_called_once_with("Visa", "201")
+    by_id = {j.job_id_from_source: j for j in jobs}
+    assert "desc-201" in (by_id["201"].job_description or "")
+    assert by_id["202"].job_description is None
+    assert by_id["203"].job_description is None
+
+
 def test_fetch_all_postings_paginates_until_total():
     source = _source()
     page1 = MagicMock()

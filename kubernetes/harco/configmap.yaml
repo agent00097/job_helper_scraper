@@ -34,4 +34,6 @@ data:
   DB_POOL_MAX_IDLE: "20"
   DB_CONNECT_TIMEOUT: "15"
   SAVE_JOBS_CHUNK_SIZE: "100"
+  # Heartbeats are pumped on the I/O thread; handlers run off-callback so a
+  # long company scrape cannot stall AMQP and redeliver the same board.
   RABBITMQ_HEARTBEAT: "300"

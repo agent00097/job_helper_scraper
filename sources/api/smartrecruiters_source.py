@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 SMARTRECRUITERS_API_BASE = "https://api.smartrecruiters.com/v1/companies"
 PAGE_SIZE = 100
 MAX_PAGES = 200
+# List responses have no job-ad body. First-run boards can have 600+ postings;
+# a detail GET per job at 30 rpm exceeds COMPANY_SCRAPE_TIMEOUT_SECONDS and
+# saves nothing. Cap details per run; later scrapes fill via selective skip.
+DEFAULT_MAX_DETAIL_FETCHES = 50
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -123,6 +127,13 @@ class SmartRecruitersSource(BaseSource):
         self.rate_limiter = RateLimiter(rate_limit_per_minute)
         self.base_url = config.get("base_url", SMARTRECRUITERS_API_BASE).rstrip("/")
 
+    def _max_detail_fetches(self) -> int:
+        raw = self.config.get("max_detail_fetches_per_run", DEFAULT_MAX_DETAIL_FETCHES)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_DETAIL_FETCHES
+
     def fetch_jobs(self, company_endpoint: str, company_name: str) -> List[JobData]:
         logger.info(
             "Fetching jobs from SmartRecruiters for %s (%s)",
@@ -148,13 +159,24 @@ class SmartRecruitersSource(BaseSource):
         already_described = urls_with_existing_description(
             str(job.url) for _, job in list_parsed
         )
-        jobs: List[JobData] = []
-        detail_fetched = 0
+        pending: List[Tuple[Dict, JobData]] = []
         detail_skipped = 0
-
         for posting, list_job in list_parsed:
             if str(list_job.url) in already_described:
                 detail_skipped += 1
+            else:
+                pending.append((posting, list_job))
+
+        max_details = self._max_detail_fetches()
+        to_enrich = pending[:max_details]
+        deferred = pending[max_details:]
+        enrich_urls = {str(job.url) for _, job in to_enrich}
+
+        jobs: List[JobData] = []
+        detail_fetched = 0
+        for posting, list_job in list_parsed:
+            url = str(list_job.url)
+            if url not in enrich_urls:
                 jobs.append(list_job)
                 continue
 
@@ -181,11 +203,13 @@ class SmartRecruitersSource(BaseSource):
         jobs_with_desc = sum(1 for job in jobs if job.job_description)
         logger.info(
             "Fetched %d jobs from %s "
-            "(detail fetched %d, skipped %d; %d with descriptions this run, %d without)",
+            "(detail fetched %d, skipped %d, deferred %d; "
+            "%d with descriptions this run, %d without)",
             len(jobs),
             company_name,
             detail_fetched,
             detail_skipped,
+            len(deferred),
             jobs_with_desc,
             len(jobs) - jobs_with_desc,
         )
