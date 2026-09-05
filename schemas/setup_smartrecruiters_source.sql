@@ -12,7 +12,8 @@ VALUES (
     6,   -- Run every 6 hours
     30,  -- Conservative: list is paginated and new jobs need a detail GET
     '{
-        "base_url": "https://api.smartrecruiters.com/v1/companies"
+        "base_url": "https://api.smartrecruiters.com/v1/companies",
+        "max_detail_fetches_per_run": 50
     }'::jsonb
 )
 ON CONFLICT (name) DO UPDATE

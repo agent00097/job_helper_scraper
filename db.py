@@ -132,11 +132,19 @@ class _PooledConnection:
         if self._released:
             return
         object.__setattr__(self, "_released", True)
+        conn = self._conn
+        # Read-only callers leave the connection INTRANS; the pool then
+        # warns "rolling back returned connection" on every putconn.
         try:
-            self._pool.putconn(self._conn)
+            if not getattr(conn, "closed", True):
+                conn.rollback()
+        except Exception:
+            pass
+        try:
+            self._pool.putconn(conn)
         except Exception:
             try:
-                self._conn.close()
+                conn.close()
             except Exception:
                 pass
 

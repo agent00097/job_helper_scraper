@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import threading
 import time
 from typing import Any, Callable, Optional
 
@@ -46,6 +47,31 @@ class RabbitMQJobWorker:
             blocked_connection_timeout=self.settings.blocked_connection_timeout,
         )
 
+    def _settle_delivery(
+        self,
+        channel: BlockingChannel,
+        method: Basic.Deliver,
+        disposition: MessageDisposition,
+    ) -> None:
+        tag = method.delivery_tag
+        try:
+            if not channel.is_open:
+                logger.warning("channel closed before settle tag=%s", tag)
+                return
+            if disposition == MessageDisposition.ACK:
+                channel.basic_ack(delivery_tag=tag)
+            elif disposition == MessageDisposition.NACK_NO_REQUEUE:
+                channel.basic_nack(delivery_tag=tag, requeue=False)
+            else:
+                channel.basic_nack(
+                    delivery_tag=tag, requeue=self.settings.requeue_on_failure
+                )
+        except Exception:
+            logger.exception("failed to settle delivery tag=%s", tag)
+        finally:
+            if stop_consumer_for_recycle(channel, self._stopping):
+                self._stopping = True
+
     def _on_message(
         self,
         channel: BlockingChannel,
@@ -53,18 +79,35 @@ class RabbitMQJobWorker:
         _properties: Any,
         body: bytes,
     ) -> None:
-        try:
-            disposition = self._on_body(body)
-            tag = method.delivery_tag
-            if disposition == MessageDisposition.ACK:
-                channel.basic_ack(delivery_tag=tag)
-            elif disposition == MessageDisposition.NACK_NO_REQUEUE:
-                channel.basic_nack(delivery_tag=tag, requeue=False)
-            else:
-                channel.basic_nack(delivery_tag=tag, requeue=self.settings.requeue_on_failure)
-        finally:
-            if stop_consumer_for_recycle(channel, self._stopping):
-                self._stopping = True
+        """
+        Run the handler on a worker thread and return immediately.
+
+        Pika's BlockingConnection only sends heartbeats on the I/O thread.
+        A 1200s company scrape that blocks this callback misses the 300s
+        heartbeat; the broker resets the socket, ACK fails, and the same
+        company is redelivered to every replica.
+        """
+        connection = channel.connection
+
+        def work() -> None:
+            try:
+                disposition = self._on_body(body)
+            except Exception:
+                logger.exception("message handler failed")
+                disposition = MessageDisposition.NACK_REQUEUE
+
+            def settle() -> None:
+                self._settle_delivery(channel, method, disposition)
+
+            try:
+                connection.add_callback_threadsafe(settle)
+            except Exception as exc:
+                logger.warning(
+                    "could not schedule AMQP settle (connection likely closed): %s",
+                    exc,
+                )
+
+        threading.Thread(target=work, name="amqp-handler", daemon=True).start()
 
     def _register_signals(self) -> None:
         def handle(_sig, _frame):
