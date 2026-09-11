@@ -25,7 +25,7 @@ spec:
         app: jobscraper
     spec:
       nodeSelector:
-        kubernetes.io/hostname: harco-1
+        location: hetzner
       # Committed intentionally for private GHCR pulls in harco (no manual patch).
       imagePullSecrets:
         - name: ghcr-pull-secret
