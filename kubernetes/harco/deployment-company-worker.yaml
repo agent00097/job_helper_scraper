@@ -23,7 +23,12 @@ spec:
         app: jobscraper-company-worker
     spec:
       nodeSelector:
-        kubernetes.io/hostname: harco-worker-home
+        location: home
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "home"
+          effect: "NoSchedule"
       imagePullSecrets:
         - name: ghcr-pull-secret
       terminationGracePeriodSeconds: 60

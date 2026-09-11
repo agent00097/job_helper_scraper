@@ -23,7 +23,7 @@ spec:
         app: jobscraper-rabbitmq-worker
     spec:
       nodeSelector:
-        kubernetes.io/hostname: harco-1
+        location: hetzner
       imagePullSecrets:
         - name: ghcr-pull-secret
       terminationGracePeriodSeconds: 60
