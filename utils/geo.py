@@ -362,6 +362,16 @@ def parse_location(location: Optional[str]) -> GeoParts:
         return GeoParts()
 
     raw_lower = raw.lower()
+    # "IN - Hyderabad_Twitza" splits to bare "IN" (Indiana) and drops the city.
+    # An unambiguous foreign city anywhere in the string wins over that.
+    foreign_city = _foreign_city_anywhere(raw_lower)
+    if foreign_city:
+        code, city = foreign_city
+        return GeoParts(
+            country_code=code,
+            locality=city.title(),
+            geo_precision="locality",
+        )
 
     # Remote / anywhere with optional country (check full string before splitting).
     if _REMOTE_RE.search(raw_lower):
@@ -548,7 +558,28 @@ def parse_location(location: Optional[str]) -> GeoParts:
     )
     if country:
         return GeoParts(country_code=country, geo_precision="country")
+    if re.search(r"\b(qld|nsw|vic|tas|act)\b", raw_lower):
+        return GeoParts(country_code="AU", geo_precision="admin1")
     return GeoParts()
+
+
+# US, Canada, Mexico, and Puerto Rico. Unknown locations are not outside.
+_NORTH_AMERICA = frozenset({"US", "CA", "MX", "PR"})
+
+
+def is_outside_north_america(location: Optional[str]) -> bool:
+    """True when a location is confidently outside North America.
+
+    Empty, remote-with-no-country, and unclassified strings return False so a
+    US posting with a messy location is still saved. India, the UK, Australia,
+    and similar clear matches return True.
+    """
+    if not location or not str(location).strip():
+        return False
+    code = parse_location(location).country_code
+    if not code:
+        return False
+    return code not in _NORTH_AMERICA
 
 
 def derive_country_fast(location: str) -> Optional[str]:
@@ -587,6 +618,16 @@ def _iso_token(token: str) -> Optional[str]:
     """The bare two-letter code in a token ("IL", " il "), else None."""
     compact = re.sub(r"[^A-Za-z]", "", token or "").upper()
     return compact if len(compact) == 2 else None
+
+
+def _foreign_city_anywhere(text_lower: str) -> Optional[tuple[str, str]]:
+    """(ISO code, city) when an unambiguous foreign city appears in free text."""
+    if not text_lower:
+        return None
+    for city in sorted(_FOREIGN_CITIES, key=len, reverse=True):
+        if re.search(r"(?<![a-z])" + re.escape(city) + r"(?![a-z])", text_lower):
+            return _FOREIGN_CITIES[city], city
+    return None
 
 
 def _foreign_city(locality: str, *, iso_token: Optional[str] = None) -> Optional[str]:

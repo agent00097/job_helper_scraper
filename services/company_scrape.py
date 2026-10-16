@@ -19,6 +19,7 @@ from utils.job_archive import (
     seen_keys_from_jobs,
     supports_presence_reconcile,
 )
+from utils.geo import is_outside_north_america
 from utils.job_storage import save_jobs
 from utils.process_hygiene import (
     abandon_scrape_on_timeout,
@@ -135,6 +136,7 @@ def _scrape_one_company_impl(
     try:
         jobs = source.fetch_jobs(company_endpoint, company_name)
         fetched_count = len(jobs)
+        jobs = [job for job in jobs if not is_outside_north_america(job.location)]
 
         for job in jobs:
             job.company_id = UUID(str(company_id))
