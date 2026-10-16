@@ -58,6 +58,26 @@ def test_spelled_out_country_still_works():
     assert parse_location("Remote - India").country_code == "IN"
 
 
+def test_workday_india_dash_is_not_indiana():
+    from utils.geo import is_outside_north_america
+
+    got = parse_location("IN - Hyderabad_Twitza")
+    assert got.country_code == "IN"
+    assert is_outside_north_america("IN - Hyderabad_Twitza") is True
+
+
+def test_australia_state_is_outside_north_america():
+    from utils.geo import is_outside_north_america
+
+    assert parse_location("Hervey Bay, QLD").country_code == "AU"
+    assert is_outside_north_america("Hervey Bay, QLD") is True
+    assert is_outside_north_america("Store 07167 Long Beach CA") is False
+    assert is_outside_north_america("Mexico City") is False
+    assert is_outside_north_america("Toronto, ON") is False
+    assert is_outside_north_america("Remote") is False
+    assert is_outside_north_america("") is False
+
+
 def test_us_ca_preferred_locations_unaffected():
     sac = parse_location("Sacramento, CA")
     assert (sac.country_code, sac.admin1_code) == ("US", "CA")

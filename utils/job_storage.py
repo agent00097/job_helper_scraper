@@ -10,7 +10,7 @@ from typing import List, Optional
 import db
 from models import JobData
 from utils.deduplication import generate_content_hash
-from utils.geo import parse_location
+from utils.geo import is_outside_north_america, parse_location
 from utils.role_classifier import classify_role
 
 logger = logging.getLogger(__name__)
@@ -312,6 +312,14 @@ def save_jobs(
 
     Returns (saved_count, duplicate_count).
     """
+    if not jobs:
+        return 0, 0
+
+    kept = [job for job in jobs if not is_outside_north_america(job.location)]
+    skipped = len(jobs) - len(kept)
+    if skipped:
+        logger.info("Skipped %d jobs outside North America", skipped)
+    jobs = kept
     if not jobs:
         return 0, 0
 

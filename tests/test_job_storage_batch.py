@@ -58,6 +58,15 @@ def test_save_jobs_batch_lookup_skips_existing(get_conn, extract):
     extract.assert_not_called()
 
 
+@patch("utils.job_storage.db.get_db_connection")
+def test_save_jobs_skips_locations_outside_north_america(get_conn):
+    india = _job("https://jobs.example/india")
+    india.location = "Bengaluru, India"
+    saved, dupes = save_jobs([india])
+    assert (saved, dupes) == (0, 0)
+    get_conn.assert_not_called()
+
+
 @patch("utils.job_storage._extract_skills_safe")
 @patch("utils.job_storage.db.get_db_connection")
 def test_save_jobs_inserts_missing_url_on_same_connection(get_conn, extract):
