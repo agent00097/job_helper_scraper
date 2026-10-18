@@ -136,3 +136,32 @@ def test_fetch_jobs_details_all_when_none_described():
     assert len(jobs) == 2
     assert {j.job_description for j in jobs} == {"desc-201", "desc-202"}
     assert mock_detail.call_count == 2
+
+
+def test_fetch_jobs_uses_inline_content_and_skips_detail_calls():
+    source = _source()
+    payload = _list_payload(201, 202)
+    payload["jobs"][0]["content"] = "&lt;p&gt;Inline description 201&lt;/p&gt;"
+    list_resp = MagicMock()
+    list_resp.raise_for_status = MagicMock()
+    list_resp.json.return_value = payload
+
+    with patch("sources.api.greenhouse_source.requests.get", return_value=list_resp) as mock_get, patch(
+        "sources.api.greenhouse_source.urls_with_existing_description",
+        return_value=set(),
+    ) as mock_existing, patch.object(
+        source,
+        "_fetch_job_description",
+        return_value="Detail description 202",
+    ) as mock_detail:
+        jobs = source.fetch_jobs("airbnb", "Airbnb")
+
+    by_id = {j.job_id_from_source: j for j in jobs}
+    assert by_id["201"].job_description == "Inline description 201"
+    assert by_id["202"].job_description == "Detail description 202"
+    # Only the job without inline content falls back to a detail call.
+    mock_detail.assert_called_once_with("airbnb", 202)
+    assert mock_get.call_args.kwargs["params"] == {"content": "true"}
+    # Jobs that already have inline content are not looked up in the DB.
+    looked_up = list(mock_existing.call_args[0][0])
+    assert looked_up == ["https://boards.greenhouse.io/airbnb/jobs/202"]
