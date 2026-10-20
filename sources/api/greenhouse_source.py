@@ -110,7 +110,10 @@ class GreenhouseSource(BaseSource):
         
         try:
             logger.info(f"Fetching jobs from Greenhouse for {company_name} ({company_endpoint})")
-            response = requests.get(api_url, timeout=30)
+            # content=true returns every job's description in this one list
+            # response. Without it, each new job needed its own rate-limited
+            # detail GET (60/min), so large boards blew the company timeout.
+            response = requests.get(api_url, params={"content": "true"}, timeout=30)
             response.raise_for_status()
             
             jobs_data = response.json()
@@ -120,17 +123,25 @@ class GreenhouseSource(BaseSource):
                 try:
                     job = self._parse_job(job_data, company_name, company_endpoint)
                     if job:
+                        inline_content = job_data.get("content")
+                        if isinstance(inline_content, str) and inline_content.strip():
+                            cleaned = self._clean_html(html.unescape(inline_content))
+                            if cleaned:
+                                job.job_description = cleaned
                         jobs.append(job)
                 except Exception as e:
                     logger.warning(f"Error parsing job from {company_name}: {e}")
                     continue
 
-            already_described = urls_with_existing_description(str(j.url) for j in jobs)
+            already_described = urls_with_existing_description(
+                [str(j.url) for j in jobs if not j.job_description]
+            )
             detail_fetched = 0
             detail_skipped = 0
 
             for job in jobs:
-                if str(job.url) in already_described:
+                # Description already present (inline content) or already stored.
+                if job.job_description or str(job.url) in already_described:
                     detail_skipped += 1
                     continue
 
