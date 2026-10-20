@@ -31,7 +31,7 @@ Full input list (read-only export, run by whoever has DB access):
 
 Output CSV columns:
     company_name, old_source, old_endpoint,
-    status       relocated | unsupported_ats | not_found | error
+    status       relocated | unsupported_ats | junk | not_found | error
     new_source   ashby | greenhouse | lever | smartrecruiters | workday | successfactors
                  (or the unsupported ATS name, e.g. icims)
     new_endpoint value in the format source_endpoints stores for new_source
@@ -62,7 +62,15 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
+import os
+
 import requests
+
+# Run as `python scripts/resolve_dead_boards.py`, Python puts scripts/ on the
+# path, not the repo root, so `utils.*` would not import. Add the root.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 logger = logging.getLogger("resolve_dead_boards")
 
@@ -70,7 +78,7 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-TIMEOUT = 15
+TIMEOUT = 12
 CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 
 OUT_COLS = [
@@ -91,6 +99,19 @@ _STOPWORDS = _LEGAL_SUFFIXES | {
     "holdings", "international", "technologies", "technology", "solutions",
     "services", "systems", "partners", "labs", "studio", "studios", "us", "usa",
 }
+
+# Boards that should be removed, not relocated: tests, sandboxes, internal and
+# referral-only boards.
+_JUNK_RE = re.compile(
+    r"\btest\b|test$|sandbox|referral|internal (?:posts|use)|internal employees|"
+    r"\(internal|volunteer$",
+    re.IGNORECASE,
+)
+
+
+def is_junk(company_name: str, old_endpoint: str) -> bool:
+    return bool(_JUNK_RE.search(company_name or "") or _JUNK_RE.search(old_endpoint or ""))
+
 
 SESSION = requests.Session()
 SESSION.headers["User-Agent"] = UA
@@ -121,11 +142,14 @@ def name_matches(company_name: str, candidate: str) -> bool:
     if "".join(ta) == "".join(tb):          # "Runpod" vs "RunPod", "Hub Spot" vs "HubSpot"
         return True
     # "Visier Solutions" vs "Visier": the shorter name must be the leading
-    # whole words of the longer one. Character prefixes don't count
-    # ("Tempo" is not "Temporal").
+    # whole words of the longer one, and every dropped word must be generic.
+    # Character prefixes don't count ("Tempo" is not "Temporal"), real words
+    # don't either ("Galileo" is not "Galileo Financial Technologies"), and
+    # short names are too ambiguous ("Loop" vs "Loop Industries").
     short, long_ = sorted((ta, tb), key=len)
-    # Short names ("Loop" vs "Loop Industries") are too ambiguous to prefix-match.
-    return len("".join(short)) >= 5 and long_[: len(short)] == short
+    if len("".join(short)) < 5 or long_[: len(short)] != short:
+        return False
+    return all(w in _STOPWORDS for w in long_[len(short):])
 
 
 def mentioned_in(company_name: str, texts: list[str]) -> bool:
@@ -401,6 +425,9 @@ def resolve_one(row: dict, guess_domain: bool = True) -> dict:
         "status": "not_found", "new_source": "", "new_endpoint": "", "jobs": "",
         "confidence": "", "evidence": "",
     }
+    if is_junk(company, old_endpoint):
+        result.update(status="junk", evidence="test/sandbox/internal/referral board; remove, don't relocate")
+        return result
     try:
         best: Optional[Hit] = None
 

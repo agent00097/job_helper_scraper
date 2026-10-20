@@ -190,3 +190,43 @@ def test_main_writes_csv(tmp_path):
         assert rdb.main([str(inp), "--output", str(out), "--workers", "1", "--no-guess-domain"]) == 0
     rows = list(csv.DictReader(out.open(encoding="utf-8")))
     assert rows[0]["new_source"] == "ashby" and rows[0]["confidence"] == "high"
+
+
+def test_prefix_match_only_drops_generic_words():
+    assert rdb.name_matches("Visier Solutions Inc", "Visier")
+    assert not rdb.name_matches("Galileo Financial Technologies", "Galileo")
+    assert not rdb.name_matches("Remedy Meds", "Remedy")
+    assert not rdb.name_matches("Found Ee", "Found")
+
+
+@pytest.mark.parametrize("name,slug", [
+    ("LI Test Company", "linkedin"),
+    ("Sypnewsitetest", "sypnewsitetest"),
+    ("Simplify Jobs Integration Sandbox", "simplifyjobsintegrationsandbox"),
+    ("Remote - Referral Board", "remotereferralboardinternaluseonly"),
+    ("MQ Referrals Only", "mqreferrals"),
+    ("edX Bootcamps Instructional Engagement (Internal posts ONLY)", "bootcampinstructionalengagement"),
+])
+def test_junk_boards_are_flagged_not_relocated(name, slug):
+    res = run({"company_name": name, "source": "greenhouse", "old_endpoint": slug}, {})
+    assert res["status"] == "junk"
+
+
+@pytest.mark.parametrize("name", ["HubSpot: Students", "Remote", "Temporal"])
+def test_real_boards_are_not_junk(name):
+    assert not rdb.is_junk(name, name.lower())
+
+
+def test_domain_resolver_is_importable_when_run_as_script():
+    # Regression: run as `python scripts/resolve_dead_boards.py`, the repo root
+    # wasn't on sys.path, so domain guessing silently never ran.
+    import subprocess, sys as _sys, os as _os
+    script = _os.path.join(_os.path.dirname(rdb.__file__), "resolve_dead_boards.py")
+    code = (
+        "import runpy, sys; sys.argv=['x','--help'];\n"
+        f"ns = runpy.run_path({script!r}, run_name='not_main')\n"
+        "from utils.domain_resolver import resolve_domain; print('ok')"
+    )
+    out = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=_os.path.dirname(script))
+    assert out.stdout.strip().endswith("ok"), out.stderr
