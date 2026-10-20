@@ -54,13 +54,11 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Health-based skipping (see get_source_companies). Set *_AFTER to 0 to disable.
-#   dead:  last N results for this source were all HTTP 404 -> board is gone;
-#          retry once every DEAD_RETRY_HOURS in case it comes back.
-#   empty: last N results succeeded with 0 jobs -> back off to one try
-#          every EMPTY_RETRY_HOURS instead of every scheduler run.
-SKIP_DEAD_AFTER = "SCRAPE_SKIP_DEAD_AFTER"            # default 3
-DEAD_RETRY_HOURS = "SCRAPE_DEAD_RETRY_HOURS"          # default 168 (7 days)
+# Empty-board backoff (see get_source_companies). Set SCRAPE_SKIP_EMPTY_AFTER
+# to 0 to disable. Last N results succeeded with 0 jobs -> back off to one try
+# every EMPTY_RETRY_HOURS instead of every scheduler run.
+# Dead boards (404) are deliberately NOT skipped: they stay visible on the
+# Scraper health page until relocated (scripts/resolve_dead_boards.py).
 SKIP_EMPTY_AFTER = "SCRAPE_SKIP_EMPTY_AFTER"          # default 4
 EMPTY_RETRY_HOURS = "SCRAPE_EMPTY_RETRY_HOURS"        # default 24
 
@@ -90,8 +88,6 @@ _HEALTH_FILTERED_COMPANIES_SQL = f"""
     ),
     health AS (
         SELECT company_id,
-               COUNT(*) FILTER (WHERE rn <= %(dead_n)s) AS dead_window,
-               COUNT(*) FILTER (WHERE rn <= %(dead_n)s AND http_status = 404) AS dead_hits,
                COUNT(*) FILTER (WHERE rn <= %(empty_n)s) AS empty_window,
                COUNT(*) FILTER (
                    WHERE rn <= %(empty_n)s AND status = 'success' AND jobs_fetched = 0
@@ -105,12 +101,6 @@ _HEALTH_FILTERED_COMPANIES_SQL = f"""
     LEFT JOIN health h ON h.company_id = sc.id
     WHERE jsonb_exists(sc.source_endpoints, %(source_name)s)
       AND sc.enabled = TRUE
-      AND NOT (
-          %(dead_n)s > 0
-          AND COALESCE(h.dead_window, 0) >= %(dead_n)s
-          AND h.dead_hits = h.dead_window
-          AND h.last_attempt_at > NOW() - make_interval(hours => %(dead_retry_hours)s)
-      )
       AND NOT (
           %(empty_n)s > 0
           AND COALESCE(h.empty_window, 0) >= %(empty_n)s
@@ -143,23 +133,18 @@ def get_source_companies(source_name: str) -> List[Dict]:
     {"ashby": "stripe", "workday": "https://stripe.wd5..."}.
     Returns rows whose source_endpoints map contains the given source_name key.
 
-    Companies are skipped (not disabled) based on their recent results in
-    scrape_company_results for this source:
-      * dead board: last SCRAPE_SKIP_DEAD_AFTER results were all HTTP 404,
-        retried once every SCRAPE_DEAD_RETRY_HOURS;
-      * empty board: last SCRAPE_SKIP_EMPTY_AFTER results returned 0 jobs,
-        retried once every SCRAPE_EMPTY_RETRY_HOURS.
-    Network errors, timeouts and 5xx never count toward skipping. If the
-    health query fails for any reason, falls back to scraping every enabled
-    company (the previous behaviour).
+    Empty boards are backed off (not disabled): if the last
+    SCRAPE_SKIP_EMPTY_AFTER results for this source succeeded with 0 jobs, the
+    company is retried once every SCRAPE_EMPTY_RETRY_HOURS. Failures of any
+    kind (404, network, timeout, 5xx) never cause skipping, so dead boards
+    stay visible until relocated. If the health query fails for any reason,
+    falls back to scraping every enabled company (the previous behaviour).
 
     Each returned dict exposes .id (company UUID), .company_name, and
     .company_endpoint (the per-source value from the JSONB map).
     """
     params = {
         "source_name": source_name,
-        "dead_n": _env_int(SKIP_DEAD_AFTER, 3),
-        "dead_retry_hours": _env_int(DEAD_RETRY_HOURS, 168),
         "empty_n": _env_int(SKIP_EMPTY_AFTER, 4),
         "empty_retry_hours": _env_int(EMPTY_RETRY_HOURS, 24),
     }
@@ -178,7 +163,7 @@ def get_source_companies(source_name: str) -> List[Dict]:
                 total = cur.fetchone()[0]
             if total > len(companies):
                 logger.info(
-                    "%s: skipping %d of %d companies (dead or empty boards, in backoff)",
+                    "%s: skipping %d of %d companies (empty boards, in backoff)",
                     source_name,
                     total - len(companies),
                     total,

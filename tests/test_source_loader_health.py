@@ -29,7 +29,9 @@ def test_uses_health_filtered_query_and_maps_rows():
     sql, params = filtered.execute.call_args[0]
     assert "scrape_company_results" in sql
     assert params["source_name"] == "greenhouse"
-    assert params["dead_n"] == 3 and params["empty_n"] == 4
+    assert params["empty_n"] == 4
+    assert "dead_n" not in params
+    assert "404" not in sql  # dead boards are never skipped
     conn.close.assert_called_once()
 
 
@@ -49,8 +51,8 @@ def test_falls_back_to_plain_query_when_health_query_fails():
 
 
 def test_thresholds_are_env_configurable(monkeypatch):
-    monkeypatch.setenv("SCRAPE_SKIP_DEAD_AFTER", "0")
     monkeypatch.setenv("SCRAPE_SKIP_EMPTY_AFTER", "bogus")
+    monkeypatch.setenv("SCRAPE_EMPTY_RETRY_HOURS", "6")
     filtered = MagicMock()
     filtered.fetchall.return_value = []
     count = MagicMock()
@@ -61,5 +63,5 @@ def test_thresholds_are_env_configurable(monkeypatch):
         source_loader.get_source_companies("lever")
 
     params = filtered.execute.call_args[0][1]
-    assert params["dead_n"] == 0
     assert params["empty_n"] == 4  # invalid value falls back to default
+    assert params["empty_retry_hours"] == 6
