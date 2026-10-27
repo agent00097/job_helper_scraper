@@ -383,6 +383,42 @@ def _guess_domain(company_name: str, old_endpoint: str) -> Optional[str]:
 # --------------------------------------------------------------------------
 # Resolution
 # --------------------------------------------------------------------------
+def site_matches_company(company_name: str, url_or_host: Optional[str]) -> bool:
+    """True when a website's name is the company's name: 'github.com' for
+    GitHub, 'getdbt.com' for dbt. Used to decide whether a guessed website can
+    be trusted ('clarity.com' for Hiive cannot)."""
+    if not url_or_host:
+        return False
+    host = urlparse(url_or_host if "://" in url_or_host else "https://" + url_or_host).hostname or ""
+    labels = [l for l in host.lower().split(".") if l not in {"www", "careers", "jobs", "job", "career"}]
+    if not labels:
+        return False
+    label = re.sub(r"[^a-z0-9]", "", labels[0])
+    core = re.sub(r"[^a-z0-9]", "", core_name(company_name))
+    words = [w for w in core_name(company_name).split() if w not in _STOPWORDS]
+    first = re.sub(r"[^a-z0-9]", "", words[0]) if words else ""
+    if len(core) <= 4:
+        return False  # 'mach', 'kit', 'sa': too short to tell one company from another
+    names = {core, first} - {""}
+    candidates = names | {f"{p}{n}" for n in names for p in ("get", "join", "try", "use")} \
+        | {f"{n}{q}" for n in names for q in ("hq", "app", "inc")}
+    return (label in candidates
+            or core in label                                     # 'bitly' in 'bitlycareers'
+            or (len(label) >= 6 and core.startswith(label)))     # 'thinkingmachines' for '... Lab'
+
+
+
+def _slug_matches_company(company_name: str, endpoint: str) -> bool:
+    """The new board's slug/tenant carries the company's name ('alpine-internships'
+    for Alpine Investors, 'carbon' for Carbon, Inc.)."""
+    ep = endpoint.lower()
+    if "myworkdayjobs.com" in ep:
+        ep = (urlparse(endpoint).hostname or "").split(".")[0]
+    ep = re.sub(r"[^a-z0-9]", "", ep)
+    words = [re.sub(r"[^a-z0-9]", "", w) for w in core_name(company_name).split() if w not in _STOPWORDS]
+    return any(len(w) >= 3 and w in ep for w in words)
+
+
 def _score(hit: Hit, company_name: str, from_careers_page: bool) -> Hit:
     if from_careers_page:
         hit.confidence = "high"
@@ -415,11 +451,20 @@ def _better(a: Optional[Hit], b: Optional[Hit]) -> Optional[Hit]:
     return b if kb > ka else a
 
 
+def _redirected(domain: str, page: str) -> bool:
+    """Careers page ended up on a different site than the one requested."""
+    a = re.sub(r"^www\.", "", (urlparse(domain if "://" in domain else "https://" + domain).hostname or "").lower())
+    b = re.sub(r"^www\.", "", (urlparse(page).hostname or "").lower())
+    return bool(a and b) and not (b == a or b.endswith("." + a))
+
+
 def resolve_one(row: dict, guess_domain: bool = True) -> dict:
     company = (row.get("company_name") or "").strip()
     old_source = (row.get("source") or "").strip().lower()
     old_endpoint = (row.get("old_endpoint") or "").strip()
     domain = (row.get("domain") or "").strip() or None
+    domain_from_record = bool(domain)
+    trusted = False
     result = {
         "company_name": company, "old_source": old_source, "old_endpoint": old_endpoint,
         "status": "not_found", "new_source": "", "new_endpoint": "", "jobs": "",
@@ -459,6 +504,10 @@ def resolve_one(row: dict, guess_domain: bool = True) -> dict:
                 domain = _guess_domain(company, old_endpoint)
             if domain:
                 supported, unsupported, page = scan_careers(domain)
+                # A guessed website is only trusted when its name is the company's
+                # (and the careers page didn't redirect to a different company).
+                trusted = bool(page) and (domain_from_record and not _redirected(domain, page)
+                                          or site_matches_company(company, page))
                 for src, ep in supported:
                     if src == old_source and ep.lower() == old_endpoint.lower():
                         continue
@@ -466,9 +515,14 @@ def resolve_one(row: dict, guess_domain: bool = True) -> dict:
                         hit = PROBES[src](ep)
                         if hit:
                             hit.evidence = f"{page}:"
-                            best = _better(best, _score(hit, company, from_careers_page=True))
+                            hit = _score(hit, company, from_careers_page=True)
+                            if not trusted and not _slug_matches_company(company, ep):
+                                hit.confidence = "medium"
+                                hit.evidence += " (website was guessed and doesn't match the company name)"
+                            best = _better(best, hit)
                     else:  # workday / successfactors: link found, not probed here
-                        best = _better(best, Hit(src, ep, None, evidence=f"{page}: linked from company careers page", confidence="high"))
+                        conf = "high" if trusted or _slug_matches_company(company, ep) else "medium"
+                        best = _better(best, Hit(src, ep, None, evidence=f"{page}: linked from company careers page", confidence=conf))
                 # Careers page redirected to another company's domain (an
                 # acquisition, e.g. dbt Labs -> fivetran.com): try that name.
                 if (not best or best.confidence != "high") and page:
@@ -486,7 +540,9 @@ def resolve_one(row: dict, guess_domain: bool = True) -> dict:
         elif unsupported:
             result.update(
                 status="unsupported_ats", new_source=unsupported[0],
-                confidence="high", evidence=f"careers page uses {', '.join(unsupported)}",
+                confidence="high" if trusted else "medium",
+                evidence=f"careers page uses {', '.join(unsupported)}"
+                         + ("" if trusted else " (website was guessed and doesn't match the company name)"),
             )
         else:
             result["evidence"] = "no live board found" + ("" if domain else "; no domain known")

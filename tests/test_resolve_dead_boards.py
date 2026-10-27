@@ -230,3 +230,41 @@ def test_domain_resolver_is_importable_when_run_as_script():
     out = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True,
                          cwd=_os.path.dirname(script))
     assert out.stdout.strip().endswith("ok"), out.stderr
+
+
+@pytest.mark.parametrize("company,url,trusted", [
+    ("GitHub", "https://github.com/about/careers", True),
+    ("dbt Labs", "https://www.getdbt.com/careers", True),
+    ("Thinking Machines Lab", "https://thinkingmachines.ai/", True),
+    ("Hiive", "https://www.clarity.com/careers", False),   # wrong website guess
+    ("suger", "https://www.fours.com/careers/", False),
+    ("mach", "https://mach.com/careers", False),           # name too short to tell
+])
+def test_site_matches_company(company, url, trusted):
+    assert rdb.site_matches_company(company, url) is trusted
+
+
+def test_guessed_wrong_website_downgrades_careers_page_hit():
+    """Hiive: a guessed website (clarity.com) linked to someone else's Ashby board."""
+    routes = {
+        "https://api.ashbyhq.com/posting-api/job-board/claritymovescapital": FakeResp(200, {"jobs": [{"descriptionPlain": "Join Clarity"}] * 4}),
+    }
+    with patch.object(rdb, "_guess_domain", return_value="clarity.com"), \
+         patch.object(rdb, "scan_careers", return_value=([("ashby", "claritymovescapital")], [], "https://www.clarity.com/careers")):
+        res = run({"company_name": "Hiive", "source": "ashby", "old_endpoint": "hiive"}, routes, guess_domain=True)
+    assert res["new_endpoint"] == "claritymovescapital"
+    assert res["confidence"] == "medium"
+    assert "guessed" in res["evidence"]
+
+
+def test_guessed_wrong_website_unsupported_ats_is_not_high():
+    with patch.object(rdb, "_guess_domain", return_value="noble-example.com"), \
+         patch.object(rdb, "scan_careers", return_value=([], ["workable"], "https://www.otherco.com/careers")):
+        res = run({"company_name": "Noble Thing", "source": "greenhouse", "old_endpoint": "noblething"}, {}, guess_domain=True)
+    assert res["status"] == "unsupported_ats" and res["confidence"] == "medium"
+
+
+def test_record_domain_is_trusted_even_if_name_differs():
+    with patch.object(rdb, "scan_careers", return_value=([], ["icims"], "https://careers.example.com/jobs")):
+        res = run({"company_name": "Zeta", "source": "greenhouse", "old_endpoint": "zeta", "domain": "example.com"}, {})
+    assert res["status"] == "unsupported_ats" and res["confidence"] == "high"

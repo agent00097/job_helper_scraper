@@ -327,8 +327,9 @@ def plan_failure(company: Company, source: str, endpoint: str, reason: str,
                     new_source=hit.source, new_endpoint=hit.endpoint, other=other)
     if res.get("status") == "unsupported_ats":
         action = "remove_source" if other else "disable_company"
-        return _row(action, "high", company.name, source, endpoint, category, label,
-                    evidence=f"moved to {res.get('new_source')} (not scraped by Harco)", other=other)
+        return _row(action, res.get("confidence") or "medium", company.name, source, endpoint, category, label,
+                    evidence=f"moved to {res.get('new_source')} (not scraped by Harco); {res.get('evidence', '')}".rstrip("; "),
+                    other=other)
     if category == "blocked":
         return _row("review", "medium", company.name, source, endpoint, category, label,
                     evidence="site refuses requests; may need headers or be disabled", other=other)
