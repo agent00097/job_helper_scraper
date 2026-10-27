@@ -79,6 +79,14 @@ def test_resolve_board_base_strips_search_and_query():
     )
 
 
+def test_resolve_board_base_drops_locale_only_path():
+    assert resolve_board_base("https://jobs.sap.com/en") == "https://jobs.sap.com"
+    assert resolve_board_base("https://jobs.sap.com/en_US/") == "https://jobs.sap.com"
+    assert resolve_board_base("https://jobs.sap.com/de-DE/search/?q=") == "https://jobs.sap.com"
+    # Brand paths are not locales and must be kept.
+    assert resolve_board_base("https://careers.example.com/brand") == "https://careers.example.com/brand"
+
+
 def test_parse_job_url():
     assert parse_successfactors_job_url(SAP_JOB_URL) == (
         "https://jobs.sap.com",

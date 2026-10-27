@@ -12,6 +12,7 @@ from models import JobData
 from utils.html_text import html_to_text
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
+from utils.http_retry import retry_call
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class AshbySource(BaseSource):
 
         try:
             logger.info(f"Fetching jobs from Ashby for {company_name} ({company_endpoint})")
-            response = requests.get(api_url, timeout=30)
+            response = retry_call(requests.get, api_url, timeout=30)
             response.raise_for_status()
 
             data = response.json()

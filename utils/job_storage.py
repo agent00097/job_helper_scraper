@@ -30,6 +30,7 @@ INSERT INTO jobs (
     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
     %s, %s, %s, %s, %s, %s, %s
 )
+ON CONFLICT (url) DO NOTHING
 RETURNING id
 """
 
@@ -300,6 +301,44 @@ def save_job(
         return False
 
 
+# idx_jobs_company_location_date is a btree on (company, location, date_posted);
+# a row over ~2704 bytes fails the whole insert ("index row size exceeds btree
+# maximum"). Some boards list hundreds of locations in one string. 500 chars is
+# at most 2000 bytes of UTF-8, leaving room for company + date.
+MAX_LOCATION_CHARS = 500
+
+
+def _clamp_location(location: Optional[str]) -> Optional[str]:
+    if location and len(location) > MAX_LOCATION_CHARS:
+        cut = location[:MAX_LOCATION_CHARS]
+        # Prefer cutting at a separator so we don't leave half a city name.
+        sep = max(cut.rfind(";"), cut.rfind("|"), cut.rfind(","))
+        return (cut[:sep] if sep > MAX_LOCATION_CHARS // 2 else cut).rstrip(" ,;|") + " …"
+    return location
+
+
+def _dedupe_by_url(jobs: List[JobData]) -> List[JobData]:
+    """
+    Keep one job per URL. A board can list the same posting twice in one fetch;
+    both were new, both were INSERTed, and the second violated jobs_url_key,
+    failing the whole company. Keeps the copy that has a description.
+    """
+    by_url: dict[str, JobData] = {}
+    order: list[str] = []
+    for job in jobs:
+        url = str(job.url)
+        current = by_url.get(url)
+        if current is None:
+            by_url[url] = job
+            order.append(url)
+        elif not current.job_description and job.job_description:
+            by_url[url] = job
+    dropped = len(jobs) - len(order)
+    if dropped:
+        logger.info("Dropped %d duplicate job URL(s) within one fetch", dropped)
+    return [by_url[u] for u in order]
+
+
 def save_jobs(
     jobs: List[JobData],
     source_endpoint: Optional[str] = None,
@@ -319,9 +358,11 @@ def save_jobs(
     skipped = len(jobs) - len(kept)
     if skipped:
         logger.info("Skipped %d jobs outside North America", skipped)
-    jobs = kept
+    jobs = _dedupe_by_url(kept)
     if not jobs:
         return 0, 0
+    for job in jobs:
+        job.location = _clamp_location(job.location)
 
     saved_count = 0
     duplicate_count = 0

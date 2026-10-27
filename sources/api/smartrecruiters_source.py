@@ -25,6 +25,7 @@ from utils.deduplication import urls_with_existing_description
 from utils.html_text import html_to_text
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
+from utils.http_retry import retry_call
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +224,8 @@ class SmartRecruitersSource(BaseSource):
             self.rate_limiter.wait_if_needed()
             url = f"{self.base_url}/{company_endpoint}/postings"
             try:
-                response = requests.get(
+                response = retry_call(
+                    requests.get,
                     url,
                     params={"limit": PAGE_SIZE, "offset": offset},
                     timeout=30,
