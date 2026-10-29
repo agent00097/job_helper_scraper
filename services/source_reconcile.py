@@ -1,15 +1,12 @@
 """
 Build a reviewed plan for broken company job boards ("Find broken boards").
 
-Triggered by the backend publishing {"run_id": ...} to the
-source_reconcile_tasks queue after inserting a source_reconcile_runs row.
-Reads recent scrape results from the database, decides what to do with each
-(company, source) that has really stopped working, searches for the board the
-company uses now, and writes proposals to source_reconcile_actions.
+Used by scripts/cleanup_broken_boards.py. Reads recent scrape results from
+the database, decides what to do with each (company, source) that has really
+stopped working, and searches for the board the company uses now.
 
-It NEVER changes source_companies. Applying (and undoing) a proposal is a
-separate, admin-approved step in the backend, which re-checks the board live
-first.
+Planning NEVER changes source_companies. Applying a reviewed plan (and undoing
+it) is services/board_cleanup.py, which re-checks every row first.
 
 Safety rules (a source is only considered broken when ALL hold):
   * its last MIN_FAILED_RUNS results all failed, spanning at least
@@ -37,8 +34,6 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Optional
 
-import db
-from services.scrape_request_service import MessageDisposition
 from utils import board_finder as bf
 
 logger = logging.getLogger(__name__)
@@ -359,101 +354,3 @@ def build_plan(companies: dict[str, Company], health: dict, include_empty: bool)
             if a:
                 actions.append(a)
     return actions
-
-
-# --------------------------------------------------------------------------
-# Persistence + queue entry point
-# --------------------------------------------------------------------------
-_INSERT_ACTION_SQL = """
-    INSERT INTO source_reconcile_actions (
-        run_id, company_id, action, confidence, source, endpoint,
-        new_source, new_endpoint, new_board_jobs, category, reason, evidence
-    ) VALUES (
-        %(run_id)s, %(company_id)s, %(action)s, %(confidence)s, %(source)s, %(endpoint)s,
-        %(new_source)s, %(new_endpoint)s, %(new_board_jobs)s, %(category)s, %(reason)s, %(evidence)s
-    )
-"""
-
-
-def _set_run(conn, run_id: str, status: str, summary: Optional[dict] = None, error: Optional[str] = None) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE source_reconcile_runs
-            SET status = %(status)s,
-                started_at = CASE WHEN %(status)s = 'running' THEN CURRENT_TIMESTAMP ELSE started_at END,
-                finished_at = CASE WHEN %(status)s IN ('done', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END,
-                summary = COALESCE(%(summary)s::jsonb, summary),
-                error = %(error)s
-            WHERE id = %(run_id)s
-            """,
-            {"status": status, "summary": json.dumps(summary) if summary is not None else None,
-             "error": error, "run_id": run_id},
-        )
-    conn.commit()
-
-
-def run_reconcile(run_id: str) -> dict:
-    conn = db.get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT status, include_empty_boards FROM source_reconcile_runs WHERE id = %(id)s",
-                {"id": run_id},
-            )
-            row = cur.fetchone()
-        if not row:
-            raise LookupError(f"source_reconcile_runs {run_id} not found")
-        status, include_empty = row
-        if status != "queued":
-            logger.info("reconcile run %s is %s; skipping redelivery", run_id, status)
-            return {}
-        _set_run(conn, run_id, "running")
-        companies = load_companies(conn)
-        health = load_health(conn)
-    finally:
-        conn.close()
-
-    # Network search happens with no DB connection held (it can take ~30 min).
-    actions = build_plan(companies, health, include_empty)
-
-    conn = db.get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            for a in actions:
-                cur.execute(_INSERT_ACTION_SQL, {**a, "run_id": run_id})
-        summary: dict[str, int] = defaultdict(int)
-        for a in actions:
-            summary[f"{a['action']}:{a['confidence']}"] += 1
-        summary = dict(summary)
-        conn.commit()
-        _set_run(conn, run_id, "done", summary=summary)
-        logger.info("reconcile run %s done: %s", run_id, summary)
-        return summary
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def process_reconcile_body(body: bytes | str) -> MessageDisposition:
-    try:
-        data = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
-        run_id = str(data["run_id"])
-    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
-        logger.warning("source_reconcile_tasks: bad message: %s", exc)
-        return MessageDisposition.NACK_NO_REQUEUE
-    try:
-        run_reconcile(run_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("reconcile run %s failed", run_id)
-        conn = db.get_db_connection()
-        try:
-            _set_run(conn, run_id, "failed", error=f"{type(exc).__name__}: {exc}"[:1000])
-        except Exception:  # noqa: BLE001
-            logger.exception("could not mark reconcile run %s failed", run_id)
-        finally:
-            conn.close()
-    # ACK either way: the run row records the outcome; a retry is a new run.
-    return MessageDisposition.ACK

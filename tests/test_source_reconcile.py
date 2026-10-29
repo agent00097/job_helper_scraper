@@ -2,14 +2,12 @@
 
 Rushabh's requirement: never remove or disable anything that still works.
 """
-import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from services import source_reconcile as sr
-from services.scrape_request_service import MessageDisposition
 from utils import board_finder as bf
 
 NOW = datetime(2026, 10, 28, 12, tzinfo=timezone.utc)
@@ -186,45 +184,3 @@ def test_planning_error_for_one_company_does_not_sink_the_run():
 
 
 # ------------------------------------------------------------ queue job
-def test_bad_message_is_dropped():
-    assert sr.process_reconcile_body(b"not json") == MessageDisposition.NACK_NO_REQUEUE
-    assert sr.process_reconcile_body(b"{}") == MessageDisposition.NACK_NO_REQUEUE
-
-
-def test_run_writes_actions_and_never_touches_source_companies():
-    conn = MagicMock()
-    cur = conn.cursor.return_value.__enter__.return_value
-    cur.fetchone.return_value = ("queued", False)
-    c = company(greenhouse="sparrow", ashby="sparrow")
-    h = {**broken_health("c1", "greenhouse"), **health_from(rows_for("c1", "ashby", ("success", 12, 2)))}
-    with patch.object(sr.db, "get_db_connection", return_value=conn), \
-         patch.object(sr, "load_companies", return_value={"c1": c}), \
-         patch.object(sr, "load_health", return_value=h):
-        assert sr.process_reconcile_body(json.dumps({"run_id": "r1"})) == MessageDisposition.ACK
-    sql = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
-    assert "INSERT INTO source_reconcile_actions" in sql
-    assert "UPDATE source_companies" not in sql and "DELETE" not in sql.upper()
-    statuses = [call.args[1].get("status") for call in cur.execute.call_args_list
-                if isinstance(call.args[1], dict) and "status" in call.args[1]]
-    assert statuses == ["running", "done"]
-
-
-def test_redelivered_finished_run_is_skipped():
-    conn = MagicMock()
-    cur = conn.cursor.return_value.__enter__.return_value
-    cur.fetchone.return_value = ("done", False)
-    with patch.object(sr.db, "get_db_connection", return_value=conn), \
-         patch.object(sr, "build_plan") as build:
-        sr.process_reconcile_body(json.dumps({"run_id": "r1"}))
-    build.assert_not_called()
-
-
-def test_failed_run_is_recorded():
-    conn = MagicMock()
-    cur = conn.cursor.return_value.__enter__.return_value
-    cur.fetchone.return_value = ("queued", False)
-    with patch.object(sr.db, "get_db_connection", return_value=conn), \
-         patch.object(sr, "load_companies", side_effect=RuntimeError("db gone")):
-        assert sr.process_reconcile_body(json.dumps({"run_id": "r1"})) == MessageDisposition.ACK
-    assert any(isinstance(c.args[1], dict) and c.args[1].get("status") == "failed"
-               for c in cur.execute.call_args_list)
