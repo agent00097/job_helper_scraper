@@ -17,10 +17,17 @@ from utils.deduplication import urls_with_existing_description
 from utils.html_text import html_to_text
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
+from utils.http_retry import retry_call
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 20
+# Per-run cap on detail GETs, like SmartRecruiters/SuccessFactors. Workday is
+# rate-limited to 30 req/min, so a new 600-job board needed ~630 requests
+# (~21 min) and always hit the 20-min company timeout, saving nothing.
+# Deferred jobs are saved from the list data and get their description on a
+# later run (save_jobs updates rows that are still missing one).
+DEFAULT_MAX_DETAIL_FETCHES = 50
 
 _TIME_TYPE_MAP = {
     "Full_time": "Full-time",
@@ -33,9 +40,16 @@ _TIME_TYPE_MAP = {
 _MULTI_LOCATION_RE = re.compile(r"^\d+\s+Locations?$", re.IGNORECASE)
 
 
+_LOCALE_SEGMENT_RE = re.compile(r"^[a-z]{2}(?:[-_][A-Za-z]{2})?$")
+
+
 def parse_workday_board_url(board_url: str) -> Tuple[str, str, str]:
     """
     Parse a Workday board URL into (tenant, dc, site).
+
+    The site path may start with a language segment; it is kept so public job
+    URLs stay identical to what is already stored. Use workday_api_site() for
+    the CXS API, which rejects it.
 
     Examples:
       "https://salesforce.wd12.myworkdayjobs.com/External_Career_Site"
@@ -57,12 +71,37 @@ def parse_workday_board_url(board_url: str) -> Tuple[str, str, str]:
     return tenant, dc, site
 
 
+def workday_api_site(site: str) -> str:
+    """
+    The site name the CXS API expects: no language segment, no job path.
+
+      "en-US/OSUCareers"            -> "OSUCareers"   (API 405'd with the locale)
+      "External/job/Engineer_R123"  -> "External"
+      "es"                          -> ValueError     (locale only, no site: 404)
+    """
+    segments = [s for s in site.split("/") if s]
+    while segments and _LOCALE_SEGMENT_RE.match(segments[0]):
+        segments.pop(0)
+    if not segments or segments[0].lower() in {"job", "jobs", "wday"}:
+        raise ValueError(
+            f"Workday board path {site!r} has no site name (only a language code)"
+        )
+    return segments[0]
+
+
 class WorkdaySource(BaseSource):
     """Workday careers API source implementation."""
 
     def __init__(self, name: str, source_id: str, config: Dict, rate_limit_per_minute: int):
         super().__init__(name, source_id, config)
         self.rate_limiter = RateLimiter(rate_limit_per_minute)
+
+    def _max_detail_fetches(self) -> int:
+        raw = self.config.get("max_detail_fetches_per_run", DEFAULT_MAX_DETAIL_FETCHES)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_DETAIL_FETCHES
 
     def fetch_jobs(self, company_endpoint: str, company_name: str) -> List[JobData]:
         try:
@@ -73,8 +112,9 @@ class WorkdaySource(BaseSource):
             raise
 
         base_host = f"https://{tenant}.{dc}.myworkdayjobs.com"
-        api_base = f"{base_host}/wday/cxs/{tenant}/{site}"
-        public_base = f"{base_host}/{site}"
+        # Raises ValueError for a locale-only path; the worker records the failure.
+        api_base = f"{base_host}/wday/cxs/{tenant}/{workday_api_site(site)}"
+        public_base = f"{base_host}/{site}"  # unchanged: stored job URLs depend on it
 
         logger.info(
             "Fetching jobs from Workday for %s (tenant=%s, dc=%s, site=%s)",
@@ -105,10 +145,16 @@ class WorkdaySource(BaseSource):
         jobs: List[JobData] = []
         detail_fetched = 0
         detail_skipped = 0
+        deferred = 0
+        max_details = self._max_detail_fetches()
 
         for posting, list_job in list_parsed:
             if str(list_job.url) in already_described:
                 detail_skipped += 1
+                jobs.append(list_job)
+                continue
+            if detail_fetched >= max_details:
+                deferred += 1
                 jobs.append(list_job)
                 continue
 
@@ -130,11 +176,13 @@ class WorkdaySource(BaseSource):
         jobs_with_desc = sum(1 for j in jobs if j.job_description)
         logger.info(
             "Fetched %d jobs from %s "
-            "(detail fetched %d, skipped %d; %d with descriptions this run, %d without)",
+            "(detail fetched %d, skipped %d, deferred %d; "
+            "%d with descriptions this run, %d without)",
             len(jobs),
             company_name,
             detail_fetched,
             detail_skipped,
+            deferred,
             jobs_with_desc,
             len(jobs) - jobs_with_desc,
         )
@@ -154,7 +202,8 @@ class WorkdaySource(BaseSource):
                 "searchText": "",
             }
             try:
-                resp = requests.post(
+                resp = retry_call(
+                    requests.post,
                     f"{api_base}/jobs",
                     json=payload,
                     timeout=30,
@@ -364,7 +413,11 @@ class WorkdaySource(BaseSource):
             return None
 
         base_host = f"https://{tenant}.{dc}.myworkdayjobs.com"
-        api_base = f"{base_host}/wday/cxs/{tenant}/{site}"
+        try:
+            api_base = f"{base_host}/wday/cxs/{tenant}/{workday_api_site(site)}"
+        except ValueError as e:
+            logger.warning("Cannot use Workday board URL from %s: %s", url, e)
+            return None
         public_base = f"{base_host}/{site}"
         job_url = f"{public_base}{external_path}"
         job_id = external_path.lstrip("/").replace("/", "_")

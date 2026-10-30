@@ -33,6 +33,7 @@ from utils.deduplication import urls_with_existing_description
 from utils.html_text import html_to_text, parsed_html
 from utils.occupation_category import from_title
 from utils.rate_limiter import RateLimiter
+from utils.http_retry import retry_call
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,10 @@ _BOARD_PATH_STRIP_RE = re.compile(
     r"/(?:search|tile-search-results)(?:/.*)?$",
     re.IGNORECASE,
 )
+# A board path that is only a locale ("/en", "/en_US", "/de-DE") is not part
+# of the RMK board root: jobs.sap.com/en/tile-search-results/ 404s while
+# jobs.sap.com/tile-search-results/ works. Brand paths are kept.
+_LOCALE_ONLY_PATH_RE = re.compile(r"^/[a-z]{2}(?:[_-][a-z]{2})?$", re.IGNORECASE)
 _SKIP_HOST_LABELS = frozenset({"www", "jobs", "job", "careers", "career"})
 _REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
@@ -113,6 +118,8 @@ def resolve_board_base(company_endpoint: str) -> str:
     if not parsed.hostname:
         raise ValueError(f"Unrecognized SuccessFactors board URL: {company_endpoint!r}")
     path = _BOARD_PATH_STRIP_RE.sub("", parsed.path or "").rstrip("/")
+    if _LOCALE_ONLY_PATH_RE.match(path):
+        path = ""
     return f"{parsed.scheme}://{parsed.hostname}{path}"
 
 
@@ -402,7 +409,8 @@ class SuccessFactorsSource(BaseSource):
         for _page in range(MAX_PAGES):
             self.rate_limiter.wait_if_needed()
             try:
-                response = self._http.get(
+                response = retry_call(
+                    self._http.get,
                     tile_url,
                     params={"startrow": startrow},
                     headers={"Referer": f"{board_base}/search/"},
