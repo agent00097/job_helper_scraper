@@ -7,12 +7,15 @@ Three steps, run from the job_helper_scraper root with DB_* env set:
   1. plan   (read-only; network search, about 10-35 min depending on --workers)
        python scripts/cleanup_broken_boards.py plan --output plan.csv
 
-     Open plan.csv. Put "yes" in the apply column of the rows you want, or use
-     --high in step 2 to take every high-confidence fix.
+     No editing needed: step 2 picks rows by confidence (--high, or
+     --min-confidence medium) and optionally by --actions. Marking a row
+     "yes" in the apply column also selects it.
 
   2. apply  (dry run unless --commit)
        python scripts/cleanup_broken_boards.py apply --plan plan.csv --high
        python scripts/cleanup_broken_boards.py apply --plan plan.csv --high --commit --log applied.csv
+       python scripts/cleanup_broken_boards.py apply --plan plan.csv --min-confidence medium \
+           --actions remove_source,relocate --commit
 
   3. undo   (only if needed; dry run unless --commit)
        python scripts/cleanup_broken_boards.py undo --log applied.csv --commit --output undone.csv
@@ -67,14 +70,24 @@ def _parse_time(s: str) -> datetime:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def select_rows(rows: list[dict], high: bool) -> list[dict]:
-    """Rows marked apply=yes, or every high-confidence fix with --high."""
+CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+
+
+def select_rows(rows: list[dict], high: bool = False, min_confidence: str = "",
+                actions: tuple[str, ...] = bc.APPLYABLE_ACTIONS) -> list[dict]:
+    """Rows marked apply=yes, plus every fix at or above --min-confidence.
+
+    --high is shorthand for --min-confidence high. Only remove_source,
+    relocate and disable_company are ever selected (limit further with
+    --actions); wait/review/keep rows are never applied.
+    """
+    floor = CONFIDENCE_RANK.get("high" if high else min_confidence, 99)
     picked = []
     for r in rows:
-        if r.get("action") not in bc.APPLYABLE_ACTIONS:
+        if r.get("action") not in bc.APPLYABLE_ACTIONS or r.get("action") not in actions:
             continue
         marked = (r.get("apply") or "").strip().lower() in ("yes", "y", "1", "true")
-        if marked or (high and r.get("confidence") == "high"):
+        if marked or CONFIDENCE_RANK.get(r.get("confidence", ""), 0) >= floor:
             picked.append(r)
     return picked
 
@@ -103,9 +116,15 @@ def cmd_plan(args) -> int:
 
 
 def cmd_apply(args) -> int:
-    rows = select_rows(_read(args.plan), args.high)
+    actions = tuple(a.strip() for a in args.actions.split(",") if a.strip()) if args.actions \
+        else bc.APPLYABLE_ACTIONS
+    bad = [a for a in actions if a not in bc.APPLYABLE_ACTIONS]
+    if bad:
+        print(f"Unknown --actions {bad}; choose from {', '.join(bc.APPLYABLE_ACTIONS)}")
+        return 2
+    rows = select_rows(_read(args.plan), args.high, args.min_confidence, actions)
     if not rows:
-        print("Nothing selected. Mark rows apply=yes or pass --high.")
+        print("Nothing selected. Pass --high or --min-confidence medium, or mark rows apply=yes.")
         return 1
     now = datetime.now(timezone.utc)
     conn = db.get_db_connection()
@@ -159,6 +178,10 @@ def main(argv=None) -> int:
     ap = sub.add_parser("apply", help="apply selected rows (dry run unless --commit)")
     ap.add_argument("--plan", required=True)
     ap.add_argument("--high", action="store_true", help="select every high-confidence fix")
+    ap.add_argument("--min-confidence", choices=["high", "medium"], default="",
+                    help="select every fix at or above this confidence (medium = high + medium)")
+    ap.add_argument("--actions", default="",
+                    help="limit to these actions, comma-separated: remove_source,relocate,disable_company")
     ap.add_argument("--commit", action="store_true", help="actually write the changes")
     ap.add_argument("--log", help="where to write results / undo info (default applied.csv)")
     ap.set_defaults(fn=cmd_apply)

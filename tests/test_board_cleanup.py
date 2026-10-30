@@ -203,6 +203,9 @@ def test_select_rows_marked_or_high():
     ]
     assert len(cli.select_rows(rows, high=False)) == 1
     assert len(cli.select_rows(rows, high=True)) == 2
+    assert len(cli.select_rows(rows, min_confidence="medium")) == 3      # never the 'wait' row
+    only_remove = cli.select_rows(rows, min_confidence="medium", actions=("remove_source",))
+    assert [r["action"] for r in only_remove] == ["remove_source"]
 
 
 def test_plan_writes_csv_without_holding_db_during_search(tmp_path, monkeypatch):
