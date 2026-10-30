@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -46,8 +46,16 @@ class SourceResults:
     healthy: bool = False   # latest run succeeded and some run in the window had jobs
 
 
+def _utc(t: Optional[datetime]) -> Optional[datetime]:
+    """scrape_company_results.finished_at is a naive UTC timestamp; make it comparable."""
+    if t is None or t.tzinfo is not None:
+        return t
+    return t.replace(tzinfo=timezone.utc)
+
+
 def summarize_results(rows: Iterable[tuple], planned_at: datetime) -> dict[str, SourceResults]:
     """rows: (source_name, status, jobs_fetched, finished_at), newest first."""
+    planned_at = _utc(planned_at)
     out: dict[str, SourceResults] = {}
     had_jobs: dict[str, bool] = {}
     for source, status, jobs, finished in rows:
@@ -56,6 +64,7 @@ def summarize_results(rows: Iterable[tuple], planned_at: datetime) -> dict[str, 
             r = out[source] = SourceResults(last_status=status)
         ok = status == "success"
         with_jobs = ok and (jobs or 0) > 0
+        finished = _utc(finished)
         if finished is not None and finished > planned_at:
             r.success_since_plan |= ok
             r.jobs_since_plan |= with_jobs

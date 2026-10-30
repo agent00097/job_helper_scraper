@@ -42,6 +42,15 @@ def test_summarize_results_tracks_since_plan_and_health():
     assert r["workday"].success_since_plan and not r["workday"].jobs_since_plan
 
 
+def test_naive_utc_finished_at_from_db_is_handled():
+    # finished_at is "timestamp without time zone" in production (naive UTC).
+    naive = lambda t: t.astimezone(timezone.utc).replace(tzinfo=None)  # noqa: E731
+    rows = [("ashby", "success", 5, naive(NOW - timedelta(hours=1))),
+            ("workday", "failed", 0, naive(NOW - timedelta(hours=3)))]
+    r = summarize_results(rows, PLAN)
+    assert r["ashby"].jobs_since_plan and not r["workday"].success_since_plan
+
+
 # ---------------------------------------------------------------- remove
 def test_remove_when_other_source_healthy():
     d = decide_apply(ctx(), NOW)
