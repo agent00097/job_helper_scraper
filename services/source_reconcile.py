@@ -29,7 +29,7 @@ import json
 import logging
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -194,6 +194,28 @@ def broken_reason(source: str, h: SourceHealth) -> Optional[tuple[str, str]]:
     return cats[0]
 
 
+def diagnose(health: dict) -> Counter:
+    """Why each failing (company, source) with no success in the window is or isn't 'broken'."""
+    out: Counter = Counter()
+    for (_, src), h in health.items():
+        if h.successes_with_jobs or h.successes_empty:
+            continue
+        if h.streak_failures < MIN_FAILED_RUNS:
+            out[f"not yet: fewer than {MIN_FAILED_RUNS} failures"] += 1
+        elif h.last_failures[0][0] - h.streak_oldest < timedelta(hours=MIN_FAILURE_SPAN_HOURS):
+            out[f"not yet: failing for under {MIN_FAILURE_SPAN_HOURS}h"] += 1
+        else:
+            br = broken_reason(src, h)
+            if br:
+                out[f"broken: {br[1]}"] += 1
+            else:
+                labels = sorted({classify_failure(src, m, st)[1] for _, st, m in h.last_failures}
+                                - {lbl for c, lbl in (classify_failure(src, m, st)
+                                                      for _, st, m in h.last_failures) if c in BROKEN_CATEGORIES})
+                out[f"ignored (not the board's fault): {', '.join(labels)}"] += 1
+    return out
+
+
 def is_empty_board(h: SourceHealth) -> bool:
     return h.successes_with_jobs == 0 and h.successes_empty >= MIN_FAILED_RUNS and h.last_status == "success"
 
@@ -215,8 +237,9 @@ def healthy_other_sources(company: Company, source: str, health) -> dict[str, st
 # --------------------------------------------------------------------------
 def _action(company: Company, source: str, action: str, confidence: str, category: str,
             reason: str, evidence: str = "", new_source: str = "", new_endpoint: str = "",
-            new_jobs: Optional[int] = None) -> dict:
+            new_jobs: Optional[int] = None, other_company_id: Optional[str] = None) -> dict:
     return {
+        "other_company_id": other_company_id,
         "company_id": company.id, "company_name": company.name, "source": source,
         "endpoint": company.sources.get(source, ""), "action": action, "confidence": confidence,
         "category": category, "reason": reason, "evidence": evidence,
@@ -323,11 +346,13 @@ def plan_duplicates(companies: dict[str, Company]) -> tuple[list[dict], dict[str
             if len(c.sources) > 1:
                 actions.append(_action(c, s, "remove_source", "high", "duplicate_row",
                                        "same board scraped by two company rows",
-                                       f"'{keeper.name}' already scrapes {s}:{c.sources[s]}"))
+                                       f"'{keeper.name}' already scrapes {s}:{c.sources[s]}",
+                                       other_company_id=keeper.id))
             else:
                 actions.append(_action(c, s, "disable_company", "medium", "duplicate_row",
                                        "same board scraped by two company rows",
-                                       f"duplicate of '{keeper.name}'; review before disabling"))
+                                       f"duplicate of '{keeper.name}', which scrapes the same board",
+                                       other_company_id=keeper.id))
     return actions, ep_owner
 
 
@@ -356,8 +381,11 @@ def build_plan(companies: dict[str, Company], health: dict, include_empty: bool)
             logger.exception("reconcile: planning failed for %s/%s", c.name, src)
             return _action(c, src, "review", "low", "error", "planning error", f"{type(exc).__name__}: {exc}"[:300])
 
+    logger.info("planning %d broken/empty boards with %d workers", len(work), max(1, SEARCH_WORKERS))
     with ThreadPoolExecutor(max_workers=max(1, SEARCH_WORKERS)) as pool:
-        for a in pool.map(run, work):
+        for i, a in enumerate(pool.map(run, work), 1):
             if a:
                 actions.append(a)
+            if i % 50 == 0 or i == len(work):
+                logger.info("  searched %d/%d", i, len(work))
     return actions

@@ -1,30 +1,25 @@
 #!/usr/bin/env python3
 """
-Find broken company job boards, review the plan, then apply or undo it.
+Find broken company job boards and clean them up, safely and undoably.
 
-Three steps, run from the job_helper_scraper root with DB_* env set:
+Run from the job_helper_scraper root (DB settings from .env or DB_* env):
 
-  1. plan   (read-only; network search, about 10-35 min depending on --workers)
-       python scripts/cleanup_broken_boards.py plan --output plan.csv
+    python scripts/cleanup_broken_boards.py plan              # read-only, writes plan.csv
+    python scripts/cleanup_broken_boards.py apply             # dry run: shows what would change
+    python scripts/cleanup_broken_boards.py apply --commit    # makes the changes, writes an undo log
 
-     No editing needed: step 2 picks rows by confidence (--high, or
-     --min-confidence medium) and optionally by --actions. Marking a row
-     "yes" in the apply column also selects it.
+    python scripts/cleanup_broken_boards.py undo --log applied_<time>.csv --commit
 
-  2. apply  (dry run unless --commit)
-       python scripts/cleanup_broken_boards.py apply --plan plan.csv --high
-       python scripts/cleanup_broken_boards.py apply --plan plan.csv --high --commit --log applied.csv
-       python scripts/cleanup_broken_boards.py apply --plan plan.csv --min-confidence medium \
-           --actions remove_source,relocate --commit
+No CSV editing is needed. By default apply takes the safe fixes:
+  * remove a dead board from a company that still has a working one
+  * move a board to where the company moved (high confidence only)
+  * remove/disable duplicate company rows whose board another row still scrapes
+Add --include-disable to also disable companies with no working board at all.
 
-  3. undo   (only if needed; dry run unless --commit)
-       python scripts/cleanup_broken_boards.py undo --log applied.csv --commit --output undone.csv
-
-A source is only planned for removal/relocation when its last 3+ runs over
-24h+ all failed with "board gone"/403 errors and it had no success in 7 days.
-Apply re-checks every row first (see services/board_cleanup.py) and never
-deletes anything: it drops one source, swaps one source for another, or sets
-enabled = false. The apply log holds the previous values for undo.
+A board counts as broken only when it has failed on every run for 24h+, with
+no success in 7 days, and its latest failures are "board gone"/403 errors
+(timeouts and our own bugs never count). Before each change apply re-checks
+the row (services/board_cleanup.py). Nothing is ever deleted.
 """
 from __future__ import annotations
 
@@ -47,7 +42,7 @@ logger = logging.getLogger("cleanup_broken_boards")
 
 PLAN_COLS = ["apply", "planned_at", "company_id", "company_name", "action", "confidence",
              "source", "endpoint", "new_source", "new_endpoint", "new_board_jobs",
-             "category", "reason", "evidence"]
+             "category", "reason", "evidence", "other_company_id"]
 LOG_COLS = PLAN_COLS + ["result", "note", "previous_endpoints", "previous_enabled"]
 UNDO_COLS = LOG_COLS + ["undo_result", "undo_note"]
 
@@ -73,21 +68,44 @@ def _parse_time(s: str) -> datetime:
 CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 
 
-def select_rows(rows: list[dict], high: bool = False, min_confidence: str = "",
-                actions: tuple[str, ...] = bc.APPLYABLE_ACTIONS) -> list[dict]:
-    """Rows marked apply=yes, plus every fix at or above --min-confidence.
+def _marked(r: dict) -> bool:
+    return (r.get("apply") or "").strip().lower() in ("yes", "y", "1", "true")
 
-    --high is shorthand for --min-confidence high. Only remove_source,
-    relocate and disable_company are ever selected (limit further with
-    --actions); wait/review/keep rows are never applied.
+
+def is_safe_default(r: dict, include_disable: bool = False) -> bool:
+    """The rows apply takes when no selection flags are given."""
+    action, conf = r.get("action"), r.get("confidence")
+    if r.get("category") == "duplicate_row":
+        return action in ("remove_source", "disable_company")
+    if action == "remove_source":
+        return True          # only applied while another source still returns jobs
+    if action == "relocate":
+        return conf == "high"
+    if action == "disable_company":
+        return include_disable and conf in ("high", "medium")
+    return False
+
+
+def select_rows(rows: list[dict], high: bool = False, min_confidence: str = "",
+                actions: tuple[str, ...] = (), include_disable: bool = False) -> list[dict]:
+    """Which plan rows to apply.
+
+    No flags: the safe default set (is_safe_default). --high / --min-confidence /
+    --actions switch to explicit selection instead. Rows marked apply=yes are
+    always included. wait/review/keep rows are never applied.
     """
-    floor = CONFIDENCE_RANK.get("high" if high else min_confidence, 99)
+    explicit = bool(high or min_confidence or actions)
+    floor = CONFIDENCE_RANK.get("high" if high else (min_confidence or "low"), 1)
+    allowed = actions or bc.APPLYABLE_ACTIONS
     picked = []
     for r in rows:
-        if r.get("action") not in bc.APPLYABLE_ACTIONS or r.get("action") not in actions:
+        if r.get("action") not in bc.APPLYABLE_ACTIONS:
             continue
-        marked = (r.get("apply") or "").strip().lower() in ("yes", "y", "1", "true")
-        if marked or CONFIDENCE_RANK.get(r.get("confidence", ""), 0) >= floor:
+        if explicit:
+            chosen = r.get("action") in allowed and CONFIDENCE_RANK.get(r.get("confidence", ""), 0) >= floor
+        else:
+            chosen = is_safe_default(r, include_disable)
+        if chosen or _marked(r):
             picked.append(r)
     return picked
 
@@ -108,24 +126,35 @@ def cmd_plan(args) -> int:
     rows.sort(key=lambda r: (r["action"] not in bc.APPLYABLE_ACTIONS, r["confidence"] != "high",
                              r["action"], r["company_name"]))
     _write(args.output, PLAN_COLS, rows)
-    counts = Counter(f"{r['action']}:{r['confidence']}" for r in rows)
-    logger.info("wrote %d rows to %s", len(rows), args.output)
-    for k, v in sorted(counts.items()):
-        print(f"  {k:28} {v}")
+
+    print("\nFailing boards with no success in 7 days, and why:")
+    for k, v in sr.diagnose(health).most_common():
+        print(f"  {v:6}  {k}")
+    print(f"\nPlan: {len(rows)} rows -> {args.output}")
+    for k, v in sorted(Counter(f"{r['action']} ({r['confidence']}, {r['category']})" for r in rows).items()):
+        print(f"  {v:6}  {k}")
+    safe = len(select_rows(rows))
+    extra = len(select_rows(rows, include_disable=True)) - safe
+    print(f"\napply will take {safe} safe fixes by default"
+          + (f" (+{extra} company disables with --include-disable)" if extra else "") + ".")
+    print(f"Next: python scripts/cleanup_broken_boards.py apply --plan {args.output}   (dry run)")
     return 0
 
 
 def cmd_apply(args) -> int:
-    actions = tuple(a.strip() for a in args.actions.split(",") if a.strip()) if args.actions \
-        else bc.APPLYABLE_ACTIONS
+    actions = tuple(a.strip() for a in args.actions.split(",") if a.strip())
     bad = [a for a in actions if a not in bc.APPLYABLE_ACTIONS]
     if bad:
         print(f"Unknown --actions {bad}; choose from {', '.join(bc.APPLYABLE_ACTIONS)}")
         return 2
-    rows = select_rows(_read(args.plan), args.high, args.min_confidence, actions)
+    rows = select_rows(_read(args.plan), args.high, args.min_confidence, actions, args.include_disable)
     if not rows:
-        print("Nothing selected. Pass --high or --min-confidence medium, or mark rows apply=yes.")
-        return 1
+        print("Nothing to apply: the plan has no fixes in the selected set.")
+        return 0
+    log = args.log or (f"applied_{datetime.now():%Y%m%d_%H%M%S}.csv" if args.commit else "apply_dry_run.csv")
+    if args.commit and os.path.exists(log):
+        print(f"{log} already exists; it may hold undo info. Pass a new --log name.")
+        return 2
     now = datetime.now(timezone.utc)
     conn = db.get_db_connection()
     out = []
@@ -134,13 +163,16 @@ def cmd_apply(args) -> int:
             out.append(bc.apply_row(conn, r, _parse_time(r["planned_at"]), now, args.commit))
     finally:
         conn.close()
-    log = args.log or ("applied.csv" if args.commit else "apply_dry_run.csv")
     _write(log, LOG_COLS, out)
-    print(("APPLIED" if args.commit else "DRY RUN (nothing changed; add --commit)") + f" -> {log}")
+    print(("APPLIED. Keep this file, it is the undo log" if args.commit
+           else "DRY RUN, nothing changed. Run again with --commit to apply") + f" -> {log}")
     for k, v in sorted(Counter(r["result"] for r in out).items()):
         print(f"  {k:12} {v}")
     for k, v in Counter(r["note"] for r in out if r["result"] == "skipped").most_common(8):
         print(f"    skipped: {v:4}  {k}")
+    done = Counter(f"{r['action']} ({r['category']})" for r in out if r["result"] in ("applied", "would_apply"))
+    for k, v in done.most_common():
+        print(f"    {'applied' if args.commit else 'would apply'}: {v:4}  {k}")
     return 0
 
 
@@ -176,14 +208,16 @@ def main(argv=None) -> int:
     pl.set_defaults(fn=cmd_plan)
 
     ap = sub.add_parser("apply", help="apply selected rows (dry run unless --commit)")
-    ap.add_argument("--plan", required=True)
-    ap.add_argument("--high", action="store_true", help="select every high-confidence fix")
+    ap.add_argument("--plan", default="plan.csv")
+    ap.add_argument("--commit", action="store_true", help="actually write the changes (default: dry run)")
+    ap.add_argument("--include-disable", action="store_true",
+                    help="also disable companies with no working board found anywhere")
+    ap.add_argument("--log", help="undo log to write (default applied_<time>.csv)")
+    ap.add_argument("--high", action="store_true", help="explicit: every high-confidence fix")
     ap.add_argument("--min-confidence", choices=["high", "medium"], default="",
-                    help="select every fix at or above this confidence (medium = high + medium)")
+                    help="explicit: every fix at or above this confidence")
     ap.add_argument("--actions", default="",
-                    help="limit to these actions, comma-separated: remove_source,relocate,disable_company")
-    ap.add_argument("--commit", action="store_true", help="actually write the changes")
-    ap.add_argument("--log", help="where to write results / undo info (default applied.csv)")
+                    help="explicit: only these actions, comma-separated: remove_source,relocate,disable_company")
     ap.set_defaults(fn=cmd_apply)
 
     un = sub.add_parser("undo", help="undo an apply log (dry run unless --commit)")

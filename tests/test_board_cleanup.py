@@ -189,23 +189,86 @@ def test_bound_values_are_cast_to_text():
 
 
 # ---------------------------------------------------------------- CLI selection
-def test_select_rows_marked_or_high():
+def _cli():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "cleanup_cli", Path(__file__).parents[1] / "scripts" / "cleanup_broken_boards.py")
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
-    rows = [
-        {"action": "remove_source", "confidence": "high", "apply": ""},
-        {"action": "disable_company", "confidence": "medium", "apply": "yes"},
-        {"action": "disable_company", "confidence": "medium", "apply": ""},
-        {"action": "wait", "confidence": "high", "apply": "yes"},
+    return cli
+
+
+PLAN_ROWS = [
+    {"action": "remove_source", "confidence": "medium", "category": "board_gone", "apply": ""},
+    {"action": "relocate", "confidence": "high", "category": "board_gone", "apply": ""},
+    {"action": "relocate", "confidence": "medium", "category": "board_gone", "apply": ""},
+    {"action": "disable_company", "confidence": "medium", "category": "duplicate_row", "apply": ""},
+    {"action": "disable_company", "confidence": "medium", "category": "board_gone", "apply": ""},
+    {"action": "wait", "confidence": "high", "category": "transient", "apply": "yes"},
+]
+
+
+def test_default_selection_is_the_safe_set_without_any_marking():
+    cli = _cli()
+    picked = cli.select_rows(PLAN_ROWS)
+    assert [(r["action"], r["confidence"], r["category"]) for r in picked] == [
+        ("remove_source", "medium", "board_gone"),
+        ("relocate", "high", "board_gone"),
+        ("disable_company", "medium", "duplicate_row"),
     ]
-    assert len(cli.select_rows(rows, high=False)) == 1
-    assert len(cli.select_rows(rows, high=True)) == 2
-    assert len(cli.select_rows(rows, min_confidence="medium")) == 3      # never the 'wait' row
-    only_remove = cli.select_rows(rows, min_confidence="medium", actions=("remove_source",))
-    assert [r["action"] for r in only_remove] == ["remove_source"]
+    assert len(cli.select_rows(PLAN_ROWS, include_disable=True)) == 4
+
+
+def test_explicit_flags_and_marked_rows():
+    cli = _cli()
+    assert len(cli.select_rows(PLAN_ROWS, high=True)) == 1
+    assert len(cli.select_rows(PLAN_ROWS, min_confidence="medium")) == 5     # never 'wait'
+    only = cli.select_rows(PLAN_ROWS, min_confidence="medium", actions=("relocate",))
+    assert [r["action"] for r in only] == ["relocate", "relocate"]
+    marked = [dict(PLAN_ROWS[2], apply="yes")]
+    assert len(cli.select_rows(marked)) == 1
+
+
+def test_commit_never_overwrites_an_undo_log(tmp_path, monkeypatch):
+    import csv
+    cli = _cli()
+    plan = tmp_path / "plan.csv"
+    with open(plan, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cli.PLAN_COLS)
+        w.writeheader()
+        w.writerow({"action": "remove_source", "confidence": "high", "category": "board_gone",
+                    "planned_at": NOW.isoformat(), "company_id": "c1", "source": "x", "endpoint": "y"})
+    log = tmp_path / "applied.csv"
+    log.write_text("keep me")
+    monkeypatch.setattr(cli.db, "get_db_connection", lambda: (_ for _ in ()).throw(AssertionError("no DB")))
+    assert cli.main(["apply", "--plan", str(plan), "--commit", "--log", str(log)]) == 2
+    assert log.read_text() == "keep me"
+
+
+# ---------------------------------------------------------------- duplicates
+def dctx(**kw):
+    base = dict(category="duplicate_row", keeper_has_board=True,
+                results={"workday": SourceResults(last_status="success", success_since_plan=True,
+                                                   jobs_since_plan=True, healthy=True)})
+    base.update(kw)
+    return ctx(**base)
+
+
+def test_working_duplicate_board_is_removed_when_other_row_still_has_it():
+    d = decide_apply(dctx(), NOW)
+    assert d.change.kind == "remove"
+
+
+def test_duplicate_left_alone_if_other_row_lost_the_board():
+    d = decide_apply(dctx(keeper_has_board=False), NOW)
+    assert d.change is None and "other company" in d.note
+
+
+def test_duplicate_single_source_row_is_disabled_not_emptied():
+    d = decide_apply(dctx(action="disable_company", company_endpoints={"workday": "acme.wd1/External"}), NOW)
+    assert d.change.kind == "disable"
+    d = decide_apply(dctx(company_endpoints={"workday": "acme.wd1/External"}), NOW)
+    assert d.change is None and "only source" in d.note
 
 
 def test_plan_writes_csv_without_holding_db_during_search(tmp_path, monkeypatch):

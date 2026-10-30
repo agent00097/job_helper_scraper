@@ -194,3 +194,19 @@ def test_planning_error_for_one_company_does_not_sink_the_run():
 
 
 # ------------------------------------------------------------ queue job
+
+
+def test_diagnose_explains_every_failing_board():
+    gone = ("failed", 404, "404 Client Error: Not Found for url: https://x")
+    pool = ("failed", None, "couldn't get a connection after 30.00 sec")
+    rows = (rows_for("c1", "lever", *[(*gone, 4 * i + 1) for i in range(8)])       # broken
+            + rows_for("c2", "lever", (*gone, 1), (*gone, 2))                     # too few
+            + rows_for("c3", "lever", (*gone, 1), (*gone, 2), (*gone, 3))         # under 24h
+            + rows_for("c4", "lever", *[(*pool, 4 * i + 1) for i in range(8)])    # our side
+            + rows_for("c5", "lever", ("success", 10, 1)))                         # healthy
+    d = sr.diagnose(health_from(rows))
+    assert sum(d.values()) == 4
+    assert d["broken: HTTP 404"] == 1
+    assert d["not yet: fewer than 3 failures"] == 1
+    assert d["not yet: failing for under 24h"] == 1
+    assert any(k.startswith("ignored") and "DB pool" in k for k in d)

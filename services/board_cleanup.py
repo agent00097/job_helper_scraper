@@ -11,7 +11,10 @@ transaction with the company row locked, and is skipped unless ALL hold:
   * relocate: the company has no other endpoint on the new source, and no
     other company already scrapes the new board;
   * disable_company: none of the company's sources returned jobs since the
-    plan.
+    plan;
+  * duplicate rows (two company rows scraping the same board): the other,
+    kept company must still be enabled and still scrape that same board.
+    Removing/disabling the duplicate then loses no jobs.
 
 Nothing is ever deleted. The only writes to source_companies are: drop one key
 from source_endpoints, swap one key for another, or set enabled = false. Each
@@ -26,6 +29,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
+
+from utils.board_finder import endpoint_key
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +107,8 @@ class ApplyContext:
     company_enabled: bool
     results: dict[str, SourceResults] = field(default_factory=dict)
     new_endpoint_owner: Optional[str] = None
+    # duplicate_row only: the kept company is enabled and still scrapes this board
+    keeper_has_board: bool = False
 
 
 def _recovered(ctx: ApplyContext) -> bool:
@@ -117,8 +124,12 @@ def decide_apply(ctx: ApplyContext, now: datetime) -> Decision:
     if now - ctx.planned_at > timedelta(hours=PLAN_MAX_AGE_HOURS):
         return Decision(None, f"plan is older than {PLAN_MAX_AGE_HOURS}h; make a new one")
     current = ctx.company_endpoints.get(ctx.source)
+    if current is None:
+        return Decision(None, f"company no longer has a {ctx.source} board (already removed or moved)")
     if current != ctx.endpoint:
         return Decision(None, f"endpoint changed since plan (now {current!r})")
+    if ctx.category == "duplicate_row":
+        return _decide_duplicate(ctx)
     if _recovered(ctx):
         return Decision(None, "board scraped successfully since the plan; left as is")
 
@@ -148,6 +159,21 @@ def decide_apply(ctx: ApplyContext, now: datetime) -> Decision:
     if working:
         return Decision(None, f"{', '.join(sorted(working))} returned jobs since the plan")
     return Decision(Change("disable"), "disabled")
+
+
+def _decide_duplicate(ctx: ApplyContext) -> Decision:
+    """The board works, it is just scraped twice. Safe once the other row still has it."""
+    if not ctx.keeper_has_board:
+        return Decision(None, "the other company no longer scrapes this board (or is disabled)")
+    if ctx.action == "remove_source":
+        if len(ctx.company_endpoints) < 2:
+            return Decision(None, "it is the company's only source")
+        return Decision(Change("remove", ctx.source, ctx.endpoint), "removed duplicate board")
+    if ctx.action == "disable_company":
+        if not ctx.company_enabled:
+            return Decision(None, "company is already disabled")
+        return Decision(Change("disable"), "disabled duplicate company row")
+    return Decision(None, f"'{ctx.action}' is not used for duplicates")
 
 
 @dataclass
@@ -286,12 +312,24 @@ def apply_row(conn, row: dict, planned_at: datetime, now: datetime, commit: bool
                 o = cur.fetchone()
                 owner = o[0] if o else None
 
+            keeper_has_board = False
+            other = (row.get("other_company_id") or "").strip()
+            if row.get("category") == "duplicate_row" and other and other != cid:
+                cur.execute("SELECT source_endpoints, enabled FROM source_companies WHERE id = %(id)s",
+                            {"id": other})
+                k = cur.fetchone()
+                if k and k[1]:
+                    kept = _endpoints(k[0]).get(row["source"])
+                    keeper_has_board = bool(kept) and \
+                        endpoint_key(row["source"], kept) == endpoint_key(row["source"], row["endpoint"])
+
             decision = decide_apply(ApplyContext(
                 action=row["action"], category=row.get("category", ""), source=row["source"],
                 endpoint=row["endpoint"], new_source=row.get("new_source") or None,
                 new_endpoint=row.get("new_endpoint") or None, planned_at=planned_at,
                 company_endpoints=endpoints, company_enabled=enabled,
                 results=_load_results(cur, cid, planned_at), new_endpoint_owner=owner,
+                keeper_has_board=keeper_has_board,
             ), now)
             if decision.change is None:
                 conn.rollback()
