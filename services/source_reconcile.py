@@ -9,9 +9,10 @@ Planning NEVER changes source_companies. Applying a reviewed plan (and undoing
 it) is services/board_cleanup.py, which re-checks every row first.
 
 Safety rules (a source is only considered broken when ALL hold):
-  * its last MIN_FAILED_RUNS results all failed, spanning at least
-    MIN_FAILURE_SPAN_HOURS, with no successful run in LOOKBACK_DAYS;
-  * every one of those failures is a "board is gone" error (404/410/422,
+  * its last MIN_FAILED_RUNS+ results all failed, the failing streak spans at
+    least MIN_FAILURE_SPAN_HOURS, and there was no successful run in
+    LOOKBACK_DAYS;
+  * each of the newest MIN_FAILED_RUNS failures is a "board is gone" error (404/410/422,
     Workday site/host gone, 400/405 not caused by our own bugs) or a 403.
     Temporary errors and scraper bugs (timeouts, DB pool, language code in
     URL, DB insert errors, 5xx, DNS blips on shared API hosts) never qualify;
@@ -120,7 +121,9 @@ class SourceHealth:
     successes_with_jobs: int = 0
     successes_empty: int = 0
     last_status: str = ""
-    last_failures: list[tuple] = field(default_factory=list)   # (finished_at, http_status, message)
+    last_failures: list[tuple] = field(default_factory=list)   # newest MIN_FAILED_RUNS: (finished_at, http_status, message)
+    streak_failures: int = 0          # length of the unbroken run of failures at the top
+    streak_oldest: Optional[object] = None   # finished_at of the oldest failure in that run
 
 
 _HEALTH_SQL = """
@@ -164,10 +167,12 @@ def load_health(conn) -> dict[tuple[str, str], SourceHealth]:
                     h.successes_with_jobs += 1
                 else:
                     h.successes_empty += 1
-            elif status == "failed" and len(h.last_failures) < MIN_FAILED_RUNS \
-                    and h.runs == len(h.last_failures) + 1:
-                # only the unbroken run of failures at the top (most recent first)
-                h.last_failures.append((finished, http_status, msg or ""))
+            elif status == "failed" and h.runs == h.streak_failures + 1:
+                # the unbroken run of failures at the top (most recent first)
+                h.streak_failures += 1
+                h.streak_oldest = finished
+                if len(h.last_failures) < MIN_FAILED_RUNS:
+                    h.last_failures.append((finished, http_status, msg or ""))
     return health
 
 
@@ -176,9 +181,11 @@ def load_health(conn) -> dict[tuple[str, str], SourceHealth]:
 # --------------------------------------------------------------------------
 def broken_reason(source: str, h: SourceHealth) -> Optional[tuple[str, str]]:
     """(category, label) if this source has really stopped working, else None."""
-    if h.successes_with_jobs or h.successes_empty or len(h.last_failures) < MIN_FAILED_RUNS:
+    if h.successes_with_jobs or h.successes_empty or h.streak_failures < MIN_FAILED_RUNS:
         return None
-    newest, oldest = h.last_failures[0][0], h.last_failures[-1][0]
+    # Span of the whole failing streak, not just the newest 3: the scraper runs
+    # several times a day, so any 3 consecutive failures sit within 24h.
+    newest, oldest = h.last_failures[0][0], h.streak_oldest
     if newest - oldest < timedelta(hours=MIN_FAILURE_SPAN_HOURS):
         return None
     cats = [classify_failure(source, msg, status) for _, status, msg in h.last_failures]

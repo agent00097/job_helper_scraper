@@ -50,6 +50,16 @@ def test_any_success_in_window_means_not_broken():
     assert sr.broken_reason("greenhouse", h[("c1", "greenhouse")]) is None
 
 
+def test_frequent_runs_use_the_whole_failing_streak_for_the_span():
+    # Scraper runs every 4h: the newest 3 failures are within 8h, but the board
+    # has been failing for 2 days with no success.
+    gone = ("failed", 404, "404 Client Error: Not Found for url: https://x")
+    rows = rows_for("c1", "lever", *[(*gone, 4 * i + 1) for i in range(12)])
+    h = health_from(rows)[("c1", "lever")]
+    assert h.streak_failures == 12 and len(h.last_failures) == 3
+    assert sr.broken_reason("lever", h) is not None
+
+
 def test_failures_within_a_few_hours_are_not_enough():
     h = health_from(rows_for("c1", "greenhouse",
                              ("failed", 404, GH404, 1), ("failed", 404, GH404, 3), ("failed", 404, GH404, 5)))
