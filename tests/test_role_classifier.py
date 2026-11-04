@@ -19,6 +19,7 @@ from utils.role_classifier import (
     VALID_FUNCTIONS,
     _dict_lookup,
     _normalize,
+    _parse_llm_response,
     _role_from_noc,
     classify_role,
 )
@@ -173,9 +174,33 @@ class TestDictLookup:
 class TestLLMTier:
     def test_no_key_returns_none(self, monkeypatch):
         monkeypatch.delenv("ROLE_LLM_API_KEY", raising=False)
+        monkeypatch.delenv("ROLE_LLM_BASE_URL", raising=False)
         from utils.role_classifier import llm_classify
         result = llm_classify("Some Obscure Job Title XYZ")
         assert result is None
+
+    def test_base_url_enables_openai_path(self, monkeypatch):
+        monkeypatch.delenv("ROLE_LLM_API_KEY", raising=False)
+        monkeypatch.setenv("ROLE_LLM_BASE_URL", "http://ollama.harco.svc.cluster.local:11434/v1")
+        monkeypatch.setenv("ROLE_LLM_MODEL", "qwen2.5:7b")
+        with patch("utils.role_classifier._llm_openai") as mock_fn:
+            mock_fn.return_value = {"role_function": "consulting"}
+            from utils.role_classifier import llm_classify
+            result = llm_classify("Strategic Advisor")
+        assert result == {"role_function": "consulting"}
+        mock_fn.assert_called_once()
+        assert mock_fn.call_args.kwargs["base_url"] == (
+            "http://ollama.harco.svc.cluster.local:11434/v1"
+        )
+        assert mock_fn.call_args.args[1] == "qwen2.5:7b"
+
+    def test_parse_fenced_and_prefixed_json(self):
+        assert _parse_llm_response(
+            '```json\n{"role_function": "consulting"}\n```'
+        ) == {"role_function": "consulting"}
+        assert _parse_llm_response(
+            'Sure. {"role_function": "qa"}'
+        ) == {"role_function": "qa"}
 
     def test_mocked_llm_success(self, monkeypatch):
         monkeypatch.setenv("ROLE_LLM_API_KEY", "fake-key")

@@ -22,7 +22,7 @@ classify_role(title, noc_code) -> {role_function, method, confidence}
 Cheap-first cascade (stops at first confident hit):
   1. NOC code  → deterministic NOC map             (method="noc")
   2. Title     → dict lookup (O*NET + hand-overrides) (method="dict")
-  3. Title     → LLM (only when ROLE_LLM_API_KEY is set) (method="llm")
+  3. Title     → LLM (ROLE_LLM_BASE_URL or ROLE_LLM_API_KEY) (method="llm")
   No confident hit → role_function="other"           (method="fallback")
 """
 from __future__ import annotations
@@ -677,13 +677,14 @@ def _dict_lookup(title: str) -> Optional[str]:
 # Tier 3: LLM fallback
 #
 # Provider is auto-detected from ROLE_LLM_MODEL:
-#   gpt-*     → OpenAI
-#   claude-*  → Anthropic
-#   default   → OpenAI
+#   gpt-* / qwen* / anything else → OpenAI-compatible (ROLE_LLM_BASE_URL optional)
+#   claude-*                      → Anthropic
 #
-# To swap providers: change only this function.
-# If ROLE_LLM_API_KEY is absent the function returns None so the module works
-# offline (tests, CI without credentials).
+# Hosted scrape uses in-cluster Ollama:
+#   ROLE_LLM_BASE_URL=http://ollama.harco.svc.cluster.local:11434/v1
+#   ROLE_LLM_MODEL=qwen2.5:7b
+# A dummy ROLE_LLM_API_KEY is enough for the OpenAI SDK; Ollama ignores it.
+# Offline / tests: leave ROLE_LLM_API_KEY and ROLE_LLM_BASE_URL unset.
 # ---------------------------------------------------------------------------
 
 _LLM_SYSTEM_PROMPT = (
@@ -700,45 +701,61 @@ _LLM_SYSTEM_PROMPT = (
 )
 
 
+def _llm_enabled() -> bool:
+    return bool(
+        os.environ.get("ROLE_LLM_API_KEY", "").strip()
+        or os.environ.get("ROLE_LLM_BASE_URL", "").strip()
+    )
+
+
 def llm_classify(title: str) -> Optional[dict]:
     """Call the configured LLM to classify a title.
 
-    Returns {"role_function": "<value>"} or None if key absent / call fails.
+    Returns {"role_function": "<value>"} or None if unset / call fails.
     To swap providers, edit this function only.
     """
-    api_key = os.environ.get("ROLE_LLM_API_KEY", "").strip()
-    if not api_key:
+    if not _llm_enabled():
         return None
 
+    api_key = os.environ.get("ROLE_LLM_API_KEY", "").strip() or "ollama"
     model = os.environ.get("ROLE_LLM_MODEL", "gpt-4o-mini").strip()
+    base_url = os.environ.get("ROLE_LLM_BASE_URL", "").strip() or None
 
     try:
         if model.startswith("claude"):
             return _llm_anthropic(title, model, api_key)
-        return _llm_openai(title, model, api_key)
+        return _llm_openai(title, model, api_key, base_url=base_url)
     except Exception as exc:
         logger.warning("LLM classification failed for %r: %s", title, exc)
         return None
 
 
-def _llm_openai(title: str, model: str, api_key: str) -> Optional[dict]:
+def _llm_openai(
+    title: str,
+    model: str,
+    api_key: str,
+    base_url: Optional[str] = None,
+) -> Optional[dict]:
     try:
         import openai  # noqa: PLC0415
     except ImportError:
         logger.warning("openai package not installed; LLM tier disabled")
         return None
 
-    client = openai.OpenAI(api_key=api_key)
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
+    client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+    kwargs: dict = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": _LLM_SYSTEM_PROMPT},
             {"role": "user", "content": title},
         ],
-        max_tokens=30,
-        temperature=0,
-        response_format={"type": "json_object"},
-    )
+        "max_tokens": 64,
+        "temperature": 0,
+    }
+    # Vendor OpenAI accepts json_object; local Ollama / Qwen often does not.
+    if not base_url:
+        kwargs["response_format"] = {"type": "json_object"}
+    resp = client.chat.completions.create(**kwargs)
     raw = resp.choices[0].message.content or ""
     return _parse_llm_response(raw)
 
@@ -761,17 +778,29 @@ def _llm_anthropic(title: str, model: str, api_key: str) -> Optional[dict]:
     return _parse_llm_response(raw)
 
 
+_JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_JSON_OBJECT_RE = re.compile(r"\{[^{}]*\}")
+
+
 def _parse_llm_response(raw: str) -> Optional[dict]:
+    text = _JSON_FENCE_RE.sub("", raw.strip()).strip()
     try:
-        data = json.loads(raw.strip())
-        rf = data.get("role_function", "").strip()
-        if rf in VALID_FUNCTIONS:
-            return {"role_function": rf}
-        logger.warning("LLM returned unknown role_function: %r", rf)
-        return None
+        data = json.loads(text)
     except json.JSONDecodeError:
-        logger.warning("LLM response not valid JSON: %r", raw[:200])
-        return None
+        match = _JSON_OBJECT_RE.search(text)
+        if not match:
+            logger.warning("LLM response not valid JSON: %r", raw[:200])
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            logger.warning("LLM response not valid JSON: %r", raw[:200])
+            return None
+    rf = str(data.get("role_function", "")).strip()
+    if rf in VALID_FUNCTIONS:
+        return {"role_function": rf}
+    logger.warning("LLM returned unknown role_function: %r", rf)
+    return None
 
 
 # ---------------------------------------------------------------------------
