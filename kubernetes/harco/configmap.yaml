@@ -15,6 +15,10 @@ data:
   # Skill extraction on scrape (writes job_skills). Embeddings need OPENAI_API_KEY secret.
   SKILL_EXTRACTION_ENABLED: "true"
   SKILL_EXTRACTION_EMBEDDINGS: "true"
+  # Last-tier title → role_function via in-cluster Ollama. NOC/dict still win first.
+  ROLE_LLM_BASE_URL: "http://ollama.harco.svc.cluster.local:11434/v1"
+  ROLE_LLM_MODEL: "qwen2.5:7b"
+  ROLE_LLM_API_KEY: "ollama"
   RABBITMQ_PORT: "5672"
   RABBITMQ_VHOST: "jobs"
   # Abandon queue scrape_runs stuck with done < queued (hours + minutes stall).

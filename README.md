@@ -196,7 +196,7 @@ In [`kubernetes/harco/deployment.yaml`](kubernetes/harco/deployment.yaml): **req
 
 | Object | Name | Role |
 |--------|------|------|
-| ConfigMap | `jobscraper-config` | Non-secret DB settings + `PGSSLMODE` + skill-extraction flags |
+| ConfigMap | `jobscraper-config` | Non-secret DB settings + `PGSSLMODE` + skill-extraction flags + in-cluster role LLM |
 | Secret | `jobscraper-db` | `DB_PASSWORD` only (sync from `infra/pg-app-db`) |
 | Secret | `jobscraper-openai` | `OPENAI_API_KEY` (optional; from GitHub secret via deploy) |
 | Deployment | `jobscraper` | Single replica; `imagePullSecrets: ghcr-pull-secret` |
@@ -205,7 +205,7 @@ There is **no Service** or **Ingress** in this repository.
 
 **Effective container environment** (Kubernetes):
 
-- From ConfigMap `jobscraper-config`: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `PGSSLMODE`, `SKILL_EXTRACTION_*`
+- From ConfigMap `jobscraper-config`: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `PGSSLMODE`, `SKILL_EXTRACTION_*`, `ROLE_LLM_BASE_URL`, `ROLE_LLM_MODEL`, `ROLE_LLM_API_KEY`
 - From Secret `jobscraper-db` key `DB_PASSWORD`: `DB_PASSWORD`
 - From Secret `jobscraper-openai` key `OPENAI_API_KEY` (optional): `OPENAI_API_KEY`
 

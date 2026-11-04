@@ -25,7 +25,7 @@ For Kubernetes, prefer `DB_*` variables (see [`db.py`](../db.py)) so passwords w
 
 Manifests live under [`kubernetes/harco/`](../kubernetes/harco/):
 
-- [`configmap.yaml`](../kubernetes/harco/configmap.yaml) — non-secret DB settings and `PGSSLMODE`
+- [`configmap.yaml`](../kubernetes/harco/configmap.yaml) — non-secret DB settings, `PGSSLMODE`, and in-cluster Ollama role classification (`ROLE_LLM_*`)
 - [`deployment.yaml`](../kubernetes/harco/deployment.yaml) — Deployment `jobscraper`; image placeholder `PLACEHOLDER_IMAGE` is replaced by [`deploy.sh`](../kubernetes/harco/deploy.sh)
 
 [`kustomization.yaml`](../kubernetes/harco/kustomization.yaml) lists the same resources for optional `kubectl apply -k` use; the CI path uses `deploy.sh` so the image tag is always the commit SHA.
